@@ -4,19 +4,67 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Katalog i Analizator Kapsli</title>
-  <!-- Dexie.js do lokalnej bazy danych IndexedDB -->
-  <script src="https://unpkg.com/dexie@3.2.4/dist/dexie.min.js"></script>
-  <!-- JSZip do zapisywania i otwierania archiwów ZIP -->
-  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
-  <!-- Tesseract.js do lokalnego rozpoznawania tekstu OCR w przeglądarce -->
-  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-  <!-- OpenCV.js do wykrywania kapsli na zdjęciach -->
-  <script
-    async
-    src="https://docs.opencv.org/4.8.0/opencv.js"
-    onload="initOpenCv();"
-    onerror="onOpenCvError('Nie udało się pobrać opencv.js z sieci');"
-  ></script>
+  <script>
+    // Pomocnik: najpierw lokalny plik JS, w razie błędu ładowania — fallback HTTPS
+    function loadScriptWithFallback(localSrc, fallbackSrc, options = {}) {
+      const script = document.createElement('script');
+      script.src = localSrc;
+      if (options.async) script.async = true;
+
+      script.onload = () => {
+        if (typeof options.onLoad === 'function') options.onLoad();
+      };
+
+      script.onerror = () => {
+        if (!fallbackSrc) {
+          if (typeof options.onError === 'function') {
+            options.onError(`Nie udało się wczytać: ${localSrc}`);
+          }
+          return;
+        }
+        const fallback = document.createElement('script');
+        fallback.src = fallbackSrc;
+        if (options.async) fallback.async = true;
+        fallback.onload = () => {
+          if (typeof options.onLoad === 'function') options.onLoad();
+        };
+        fallback.onerror = () => {
+          if (typeof options.onError === 'function') {
+            options.onError(`Brak lokalnego pliku (${localSrc}) oraz błąd sieci (${fallbackSrc})`);
+          }
+        };
+        document.head.appendChild(fallback);
+      };
+
+      document.head.appendChild(script);
+    }
+
+    loadScriptWithFallback(
+      "./libs/dexie.min.js",
+      "https://unpkg.com/dexie@3.2.4/dist/dexie.min.js"
+    );
+    loadScriptWithFallback(
+      "./libs/jszip.min.js",
+      "https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"
+    );
+    loadScriptWithFallback(
+      "./libs/tesseract/tesseract.min.js",
+      "https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"
+    );
+    loadScriptWithFallback(
+      "./libs/opencv.js",
+      "https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.8.0-release.10/dist/opencv.js",
+      {
+        async: true,
+        onLoad: () => {
+          if (typeof initOpenCv === 'function') initOpenCv();
+        },
+        onError: (msg) => {
+          if (typeof onOpenCvError === 'function') onOpenCvError(msg);
+        }
+      }
+    );
+  </script>
   <style>
     :root {
       --bg: #f1f5f9;
@@ -804,6 +852,40 @@
   const STORED_CAP_SIZE = 220;
   const WEBP_QUALITY = 0.75;
 
+  const TESSERACT_LOCAL_BASE = new URL("./libs/tesseract/", window.location.href).href;
+  const TESSERACT_CDN_WORKER = "https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/worker.min.js";
+  const TESSERACT_CDN_CORE = "https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.0";
+  const TESSERACT_CDN_LANG = "https://tessdata.projectnaptha.com/4.0.0";
+
+  async function isLocalAssetAvailable(url) {
+    try {
+      const res = await fetch(url, { cache: 'no-store' });
+      return res.ok;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  async function createCapTesseractWorker() {
+    const hasLocalWorker = await isLocalAssetAvailable(`${TESSERACT_LOCAL_BASE}worker.min.js`);
+    const hasLocalPol = await isLocalAssetAvailable(`${TESSERACT_LOCAL_BASE}lang/pol.traineddata.gz`);
+    const hasLocalEng = await isLocalAssetAvailable(`${TESSERACT_LOCAL_BASE}lang/eng.traineddata.gz`);
+
+    if (hasLocalWorker && hasLocalPol && hasLocalEng) {
+      return Tesseract.createWorker(['pol', 'eng'], 1, {
+        workerPath: `${TESSERACT_LOCAL_BASE}worker.min.js`,
+        corePath: `${TESSERACT_LOCAL_BASE}core/`,
+        langPath: `${TESSERACT_LOCAL_BASE}lang/`
+      });
+    }
+
+    return Tesseract.createWorker(['pol', 'eng'], 1, {
+      workerPath: TESSERACT_CDN_WORKER,
+      corePath: TESSERACT_CDN_CORE,
+      langPath: TESSERACT_CDN_LANG
+    });
+  }
+
   const KNOWN_SINGLE_COLORS = [
     "czerwony",
     "srebrny",
@@ -934,20 +1016,17 @@
       return;
     }
 
-    // Przypadek A: cv jest obiektem Promise
     if (typeof cv.then === 'function') {
       cv.then((instance) => markOpenCvReady(instance))
         .catch((err) => onOpenCvError(err && err.message ? err.message : 'błąd inicjalizacji WASM'));
       return;
     }
 
-    // Przypadek B: silnik WebAssembly jest już gotowy
     if (typeof cv.Mat === 'function') {
       markOpenCvReady(cv);
       return;
     }
 
-    // Przypadek C: standardowe wywołanie zwrotne Emscripten WASM
     const prevInit = cv.onRuntimeInitialized;
     cv.onRuntimeInitialized = () => {
       if (typeof prevInit === 'function') prevInit();
@@ -963,7 +1042,6 @@
     }
   }
 
-  // Fallback gdyby skrypt załadował się przed rejestracją lub nie wyzwolił onload
   window.addEventListener('DOMContentLoaded', () => {
     renderCatalog();
     if (typeof cv !== 'undefined' && !cvReady) {
@@ -971,7 +1049,7 @@
     } else if (!cvReady && !openCvWatchdogTimer) {
       openCvWatchdogTimer = setTimeout(() => {
         if (!cvReady) {
-          onOpenCvError('brak odpowiedzi z docs.opencv.org lub blokada CSP/sieci');
+          onOpenCvError('brak ./libs/opencv.js oraz brak połączenia z CDN');
         }
       }, 25000);
     }
@@ -1345,7 +1423,7 @@
   }
 
   // ==========================================
-  // 4. EKSTRAKCJA CECH (WIELE KOLORÓW I OCR) ORAZ ZAPIS (WEBP BLOB)
+  // 4. EKSTRAKCJA CECH (WIELE KOLORÓW I OCR) ORAZ ZAPIS
   // ==========================================
   async function processAndSaveDetectedCaps() {
     if (currentCircles.length === 0) return;
@@ -1359,7 +1437,7 @@
     let worker = null;
     if (runOcr) {
       btn.innerText = "⏳ Inicjalizacja OCR...";
-      worker = await Tesseract.createWorker(['pol', 'eng']);
+      worker = await createCapTesseractWorker();
     }
 
     for (let i = 0; i < currentCircles.length; i++) {
