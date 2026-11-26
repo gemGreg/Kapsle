@@ -11,7 +11,12 @@
   <!-- Tesseract.js do lokalnego rozpoznawania tekstu OCR w przeglądarce -->
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
   <!-- OpenCV.js do wykrywania kapsli na zdjęciach -->
-  <script async src="https://docs.opencv.org/4.8.0/opencv.js" onload="onOpenCvReady();"></script>
+  <script
+    async
+    src="https://docs.opencv.org/4.8.0/opencv.js"
+    onload="initOpenCv();"
+    onerror="onOpenCvError('Nie udało się pobrać opencv.js z sieci');"
+  ></script>
   <style>
     :root {
       --bg: #f1f5f9;
@@ -56,6 +61,7 @@
       font-weight: 600;
     }
     .status-badge.ready { background: #dcfce7; color: #166534; }
+    .status-badge.error { background: #fee2e2; color: #991b1b; }
 
     .panel {
       background: var(--surface);
@@ -854,6 +860,7 @@
 
   // Stan globalny
   let cvReady = false;
+  let openCvWatchdogTimer = null;
   let currentCircles = []; // { x, y, r }
   let selectedCapIds = new Set();
   let activeTagFilters = new Set();
@@ -889,14 +896,86 @@
   const editorCanvas = document.getElementById('editorCanvas');
   const editorCtx = editorCanvas.getContext('2d');
 
-  function onOpenCvReady() {
+  function markOpenCvReady(resolvedCv) {
+    if (resolvedCv && typeof resolvedCv.Mat === 'function') {
+      window.cv = resolvedCv;
+    }
+    if (cvReady) return;
+    if (openCvWatchdogTimer) {
+      clearTimeout(openCvWatchdogTimer);
+      openCvWatchdogTimer = null;
+    }
     cvReady = true;
     const badge = document.getElementById('statusBadge');
     badge.innerText = "Gotowy (Silnik wizyjny załadowany)";
+    badge.classList.remove('error');
     badge.classList.add('ready');
     document.getElementById('uploadBtn').disabled = false;
     renderCatalog();
   }
+
+  function onOpenCvError(reason) {
+    if (cvReady) return;
+    if (openCvWatchdogTimer) {
+      clearTimeout(openCvWatchdogTimer);
+      openCvWatchdogTimer = null;
+    }
+    const badge = document.getElementById('statusBadge');
+    const detail = reason ? ` (${reason})` : '';
+    badge.innerText = `Błąd ładowania OpenCV${detail}`;
+    badge.classList.remove('ready');
+    badge.classList.add('error');
+    renderCatalog();
+  }
+
+  function initOpenCv() {
+    if (typeof cv === 'undefined') {
+      onOpenCvError('obiekt cv jest niezdefiniowany');
+      return;
+    }
+
+    // Przypadek A: cv jest obiektem Promise
+    if (typeof cv.then === 'function') {
+      cv.then((instance) => markOpenCvReady(instance))
+        .catch((err) => onOpenCvError(err && err.message ? err.message : 'błąd inicjalizacji WASM'));
+      return;
+    }
+
+    // Przypadek B: silnik WebAssembly jest już gotowy
+    if (typeof cv.Mat === 'function') {
+      markOpenCvReady(cv);
+      return;
+    }
+
+    // Przypadek C: standardowe wywołanie zwrotne Emscripten WASM
+    const prevInit = cv.onRuntimeInitialized;
+    cv.onRuntimeInitialized = () => {
+      if (typeof prevInit === 'function') prevInit();
+      markOpenCvReady(cv);
+    };
+
+    if (!openCvWatchdogTimer) {
+      openCvWatchdogTimer = setTimeout(() => {
+        if (!cvReady) {
+          onOpenCvError('przekroczono czas inicjalizacji WebAssembly');
+        }
+      }, 20000);
+    }
+  }
+
+  // Fallback gdyby skrypt załadował się przed rejestracją lub nie wyzwolił onload
+  window.addEventListener('DOMContentLoaded', () => {
+    renderCatalog();
+    if (typeof cv !== 'undefined' && !cvReady) {
+      initOpenCv();
+    } else if (!cvReady && !openCvWatchdogTimer) {
+      openCvWatchdogTimer = setTimeout(() => {
+        if (!cvReady) {
+          onOpenCvError('brak odpowiedzi z docs.opencv.org lub blokada CSP/sieci');
+        }
+      }, 25000);
+    }
+  });
 
   function revokeActiveObjectUrls() {
     activeObjectUrls.forEach(url => URL.revokeObjectURL(url));
