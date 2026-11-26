@@ -239,7 +239,7 @@
     .staging-controls {
       display: flex;
       flex-wrap: wrap;
-      gap: 18px;
+      gap: 16px;
       align-items: center;
       margin-bottom: 14px;
       padding-bottom: 14px;
@@ -262,6 +262,40 @@
       user-select: none;
     }
     .hint { font-size: 0.95rem; color: var(--muted); margin: 10px 0 0; }
+
+    #tagPreviewPanel {
+      display: none;
+      margin-top: 14px;
+      padding: 14px;
+      background: #f8fafc;
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+    }
+    .tag-preview-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .tag-preview-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      font-size: 0.95rem;
+    }
+    .tag-preview-row {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      background: #ffffff;
+      border: 1px solid #e2e8f0;
+      border-radius: 6px;
+    }
 
     /* Siatka katalogu */
     .grid {
@@ -636,9 +670,19 @@
       </label>
 
       <label style="display:inline-flex; align-items:center; gap:6px;">
+        Próg pewności OCR:
+        <input type="range" id="tagConfidenceSlider" min="20" max="90" value="40" oninput="onTagThresholdChange()" />
+        <span id="tagConfidenceVal">40</span>
+      </label>
+
+      <label style="display:inline-flex; align-items:center; gap:6px;">
         <input type="checkbox" id="enableOcrCheckbox" checked style="width:18px; height:18px;" />
         Odczytaj tekst OCR (wolniej)
       </label>
+
+      <button type="button" class="secondary" id="previewTagsBtn" onclick="previewStagedCapTags()">
+        🏷️ Podgląd tagów
+      </button>
 
       <div style="margin-left:auto; display:flex; gap:8px;">
         <button class="secondary" onclick="closeStaging()">Anuluj</button>
@@ -652,6 +696,14 @@
     <p class="hint">
       <strong>Sterowanie edytorem:</strong> <strong>Kliknij środek i przeciągnij na zewnątrz</strong> na pustym miejscu, aby dodać nowy okrąg • <strong>Przeciągnij wnętrze</strong> okręgu, aby go przesunąć • <strong>Przeciągnij krawędź</strong> okręgu, aby zmienić jego rozmiar • <strong>Kliknij prawym przyciskiem (lub Shift+Klik)</strong>, aby usunąć okrąg.
     </p>
+
+    <div id="tagPreviewPanel">
+      <div class="tag-preview-header">
+        <strong>Podgląd proponowanych tagów (przed wycięciem)</strong>
+        <span id="tagPreviewSummary" style="font-size:0.92rem; color:var(--muted);"></span>
+      </div>
+      <div id="tagPreviewList" class="tag-preview-list"></div>
+    </div>
   </div>
 
   <!-- Krok 3: Wyszukiwanie, filtrowanie, sortowanie, chmura tagów i grupowe tagowanie -->
@@ -956,6 +1008,89 @@
     "różowy"
   ];
 
+  // Reguły filtrowania kandydatów na tagi z OCR (tekst OCR pozostaje oddzielnie w ocrText)
+  const VOWEL_OR_DIGIT_RE = /[aąeęioóuy0-9]/i;
+  const TRIPLE_CHAR_RE = /(.)\1\1/u;
+  const ONLY_CONSONANTS_RE = /^[bcdfghjklmnpqrstvwxzćłńśźż]+$/i;
+  const MIN_AUTO_TAG_LENGTH = 3;
+  const MIN_BATCH_OCCURRENCES_FOR_NEW_TAG = 2;
+
+  function getSensitivityValue() {
+    const el = document.getElementById('sensitivitySlider');
+    return el ? parseInt(el.value, 10) : 22;
+  }
+
+  function getTagConfidenceThreshold() {
+    const slider = document.getElementById('tagConfidenceSlider');
+    return slider ? parseInt(slider.value, 10) : 40;
+  }
+
+  function evaluateCandidatesFromWords(words, confidenceThreshold, existingTagsSet = new Set()) {
+    const textParts = [];
+    const candidates = new Map(); // token -> maxConfidence
+
+    for (const w of words) {
+      const conf = typeof w.confidence === 'number' ? w.confidence : 65;
+      const tokens = String(w.text || '')
+        .replace(/[^\p{L}\p{N}\s-]/gu, ' ')
+        .split(/[\s-]+/)
+        .map(p => p.trim().toLowerCase())
+        .filter(Boolean);
+
+      for (const tok of tokens) {
+        if (tok.length >= 2) {
+          textParts.push(tok);
+        }
+        const isExisting = existingTagsSet.has(tok);
+        const passesShape =
+          tok.length >= MIN_AUTO_TAG_LENGTH &&
+          tok.length <= 24 &&
+          VOWEL_OR_DIGIT_RE.test(tok) &&
+          !ONLY_CONSONANTS_RE.test(tok) &&
+          !TRIPLE_CHAR_RE.test(tok);
+
+        if (isExisting || (passesShape && conf >= confidenceThreshold)) {
+          const prev = candidates.get(tok) ?? 0;
+          if (conf > prev) candidates.set(tok, conf);
+        }
+      }
+    }
+
+    return {
+      ocrText: textParts.join(' '),
+      candidates: [...candidates.entries()].map(([token, maxConfidence]) => ({
+        token,
+        maxConfidence
+      }))
+    };
+  }
+
+  function computeBatchTags(items, confidenceThreshold, existingTagsSet = new Set()) {
+    const batchCounts = new Map();
+    items.forEach(item => {
+      item.candidates.forEach(({ token }) => {
+        batchCounts.set(token, (batchCounts.get(token) || 0) + 1);
+      });
+    });
+
+    const highConfCutoff = Math.min(95, Math.max(confidenceThreshold + 25, 70));
+
+    return items.map(item => {
+      const tags = item.candidates
+        .filter(({ token, maxConfidence }) =>
+          existingTagsSet.has(token) ||
+          (batchCounts.get(token) || 0) >= MIN_BATCH_OCCURRENCES_FOR_NEW_TAG ||
+          maxConfidence >= highConfCutoff
+        )
+        .map(c => c.token);
+
+      return {
+        ...item,
+        tags: [...new Set(tags)]
+      };
+    });
+  }
+
   function normalizeColorList(raw) {
     const tokens = [];
     const pushItem = (val) => {
@@ -999,6 +1134,9 @@
 
   // Stan globalny
   let currentCircles = []; // { x, y, r }
+  let stagedOcrCache = new Map(); // circleGeometryKey -> { words }
+  let lastPreviewItems = null;
+
   let selectedCapIds = new Set();
   let activeTagFilters = new Set();
   let activeColorFilters = new Set();
@@ -1032,6 +1170,162 @@
   const cleanCtx = cleanCanvas.getContext('2d');
   const editorCanvas = document.getElementById('editorCanvas');
   const editorCtx = editorCanvas.getContext('2d');
+
+  function getCircleCacheKey(c) {
+    return `${Math.round(c.x)}_${Math.round(c.y)}_${Math.round(c.r)}`;
+  }
+
+  function invalidatePreviewState(clearOcrCache = false) {
+    lastPreviewItems = null;
+    if (clearOcrCache) {
+      stagedOcrCache.clear();
+    }
+    const panel = document.getElementById('tagPreviewPanel');
+    if (panel) {
+      panel.style.display = 'none';
+    }
+  }
+
+  function cropCircleForOcr(c) {
+    const pad = c.r * 1.08;
+    const srcSize = Math.max(16, Math.round(pad * 2));
+    const rawCropCanvas = document.createElement('canvas');
+    rawCropCanvas.width = srcSize;
+    rawCropCanvas.height = srcSize;
+    const rawCtx = rawCropCanvas.getContext('2d');
+    rawCtx.drawImage(
+      cleanCanvas,
+      c.x - pad, c.y - pad, srcSize, srcSize,
+      0, 0, srcSize, srcSize
+    );
+    return rawCropCanvas;
+  }
+
+  function onTagThresholdChange() {
+    const val = getTagConfidenceThreshold();
+    const label = document.getElementById('tagConfidenceVal');
+    if (label) label.innerText = String(val);
+
+    if (Array.isArray(lastPreviewItems) && lastPreviewItems.length > 0) {
+      recomputeAndRenderPreview(val);
+    }
+  }
+
+  function recomputeAndRenderPreview(confidenceThreshold) {
+    if (!Array.isArray(lastPreviewItems) || lastPreviewItems.length === 0) return;
+    const existingTagsSet = lastPreviewItems[0]?.existingTagsSet || new Set();
+
+    const updated = lastPreviewItems.map(item => {
+      const evaluated = evaluateCandidatesFromWords(item.words || [], confidenceThreshold, existingTagsSet);
+      return {
+        ...item,
+        ocrText: evaluated.ocrText,
+        candidates: evaluated.candidates
+      };
+    });
+
+    lastPreviewItems = updated;
+    renderStagedTagPreview(lastPreviewItems, confidenceThreshold);
+  }
+
+  function renderStagedTagPreview(rawItems, confidenceThreshold) {
+    const existingTagsSet = rawItems[0]?.existingTagsSet || new Set();
+    const computed = computeBatchTags(rawItems, confidenceThreshold, existingTagsSet);
+
+    const panel = document.getElementById('tagPreviewPanel');
+    const listEl = document.getElementById('tagPreviewList');
+    const summaryEl = document.getElementById('tagPreviewSummary');
+
+    const uniquePreviewTags = new Set(computed.flatMap(item => item.tags));
+    summaryEl.textContent = `Próg OCR: ${confidenceThreshold} • Czułość tła: ${getSensitivityValue()} • Unikalne tagi: ${uniquePreviewTags.size}`;
+
+    listEl.innerHTML = computed.map(item => {
+      const tagsHtml = item.tags.length > 0
+        ? item.tags.map(t => `<span class="tag">${escapeHtml(t)}</span>`).join(' ')
+        : '<span style="color:var(--muted);">brak tagów</span>';
+      const ocrSnippet = item.ocrText ? `"${escapeHtml(item.ocrText)}"` : 'brak tekstu OCR';
+
+      return `
+        <div class="tag-preview-row">
+          <div><strong>Kapsel #${item.capIndex}</strong> <span style="color:var(--muted);">(${ocrSnippet})</span></div>
+          <div class="tags-wrap" style="justify-content:flex-end;">${tagsHtml}</div>
+        </div>
+      `;
+    }).join('');
+
+    panel.style.display = 'block';
+  }
+
+  async function previewStagedCapTags() {
+    if (currentCircles.length === 0) {
+      alert("Brak wykrytych okręgów (zielonych kółek) na obrazie.");
+      return;
+    }
+
+    const activeDb = await initDatabase();
+    const existingCaps = activeDb ? await activeDb.caps.toArray() : [];
+    const existingTagsSet = new Set(
+      existingCaps.flatMap(c => (c.tags || []).map(t => String(t).trim().toLowerCase()).filter(Boolean))
+    );
+
+    const btn = document.getElementById('previewTagsBtn');
+    btn.disabled = true;
+
+    let worker = null;
+    try {
+      const missingCount = currentCircles.filter(c => !stagedOcrCache.has(getCircleCacheKey(c))).length;
+      if (missingCount > 0) {
+        btn.innerText = "⏳ OCR podglądu...";
+        worker = await createCapTesseractWorker();
+      }
+
+      const threshold = getTagConfidenceThreshold();
+      const freshItems = [];
+
+      for (let i = 0; i < currentCircles.length; i++) {
+        const c = currentCircles[i];
+        const key = getCircleCacheKey(c);
+        let cached = stagedOcrCache.get(key);
+
+        if (!cached && worker) {
+          btn.innerText = `⏳ OCR podglądu ${i + 1}/${currentCircles.length}...`;
+          const cropCanvas = cropCircleForOcr(c);
+          const ret = await worker.recognize(cropCanvas);
+          const words = Array.isArray(ret.data?.words) && ret.data.words.length > 0
+            ? ret.data.words
+            : String(ret.data?.text || '')
+                .split(/\s+/)
+                .filter(Boolean)
+                .map(text => ({ text, confidence: 65 }));
+          cached = { words };
+          stagedOcrCache.set(key, cached);
+        }
+
+        const words = cached ? cached.words : [];
+        const evaluated = evaluateCandidatesFromWords(words, threshold, existingTagsSet);
+
+        freshItems.push({
+          capIndex: i + 1,
+          words,
+          ocrText: evaluated.ocrText,
+          candidates: evaluated.candidates,
+          existingTagsSet
+        });
+      }
+
+      lastPreviewItems = freshItems;
+      renderStagedTagPreview(lastPreviewItems, threshold);
+    } catch (err) {
+      console.error("Błąd podglądu tagów:", err);
+      alert("Nie udało się wygenerować podglądu tagów: " + err.message);
+    } finally {
+      if (worker) {
+        await worker.terminate();
+      }
+      btn.disabled = false;
+      btn.innerText = "🏷️ Podgląd tagów";
+    }
+  }
 
   function markOpenCvReady(resolvedCv) {
     if (resolvedCv && typeof resolvedCv.Mat === 'function') {
@@ -1230,6 +1524,7 @@
       editorCanvas.height = cleanCanvas.height;
       URL.revokeObjectURL(tempUrl);
 
+      invalidatePreviewState(true);
       document.getElementById('stagingArea').style.display = 'block';
       runCapDetection();
     };
@@ -1261,6 +1556,7 @@
 
   function onSensitivityChange() {
     document.getElementById('sensitivityVal').innerText = document.getElementById('sensitivitySlider').value;
+    invalidatePreviewState(true);
     runCapDetection();
   }
 
@@ -1284,7 +1580,7 @@
     bgL /= 4; bgA /= 4; bgB /= 4;
 
     let mask = new cv.Mat.zeros(lab.rows, lab.cols, cv.CV_8UC1);
-    const sensitivity = parseInt(document.getElementById('sensitivitySlider').value, 10);
+    const sensitivity = getSensitivityValue();
 
     for (let r = 0; r < lab.rows; r++) {
       for (let c = 0; c < lab.cols; c++) {
@@ -1405,6 +1701,7 @@
     if (e.shiftKey && hit) {
       currentCircles.splice(hit.index, 1);
       activeCircleIdx = -1;
+      lastPreviewItems = null;
       drawEditorCanvas();
       return;
     }
@@ -1420,6 +1717,7 @@
         dragOffsetX = pos.x - currentCircles[hit.index].x;
         dragOffsetY = pos.y - currentCircles[hit.index].y;
       }
+      lastPreviewItems = null;
       drawEditorCanvas();
     } else {
       const defaultR = currentCircles.length > 0
@@ -1428,6 +1726,7 @@
       currentCircles.push({ x: pos.x, y: pos.y, r: defaultR });
       activeCircleIdx = currentCircles.length - 1;
       dragMode = 'create';
+      lastPreviewItems = null;
       drawEditorCanvas();
     }
   });
@@ -1476,6 +1775,7 @@
     if (hit) {
       currentCircles.splice(hit.index, 1);
       activeCircleIdx = -1;
+      lastPreviewItems = null;
       drawEditorCanvas();
     }
   });
@@ -1485,10 +1785,11 @@
     activeCircleIdx = -1;
     document.getElementById('stagingArea').style.display = 'none';
     currentCircles = [];
+    invalidatePreviewState(true);
   }
 
   // ==========================================
-  // 4. EKSTRAKCJA CECH (WIELE KOLORÓW I OCR) ORAZ ZAPIS
+  // 4. EKSTRAKCJA CECH (KOLORY, OCR I SELEKTYWNE TAGI) ORAZ ZAPIS
   // ==========================================
   async function processAndSaveDetectedCaps() {
     const activeDb = await initDatabase();
@@ -1500,9 +1801,15 @@
 
     const btn = document.getElementById('saveCapsBtn');
     const runOcr = document.getElementById('enableOcrCheckbox').checked;
+    const threshold = getTagConfidenceThreshold();
     btn.disabled = true;
 
     const savedSourceImageId = await ensureSourceImageBackupSaved();
+
+    const existingCaps = await activeDb.caps.toArray();
+    const existingTagsSet = new Set(
+      existingCaps.flatMap(c => (c.tags || []).map(t => String(t).trim().toLowerCase()).filter(Boolean))
+    );
 
     let worker = null;
     if (runOcr) {
@@ -1510,33 +1817,38 @@
       worker = await createCapTesseractWorker();
     }
 
+    const stagedItems = [];
+
     for (let i = 0; i < currentCircles.length; i++) {
       btn.innerText = `⏳ Przetwarzanie kapsla ${i + 1} z ${currentCircles.length}...`;
       const c = currentCircles[i];
-
-      const pad = c.r * 1.08;
-      const srcSize = Math.max(16, Math.round(pad * 2));
-
-      const rawCropCanvas = document.createElement('canvas');
-      rawCropCanvas.width = srcSize;
-      rawCropCanvas.height = srcSize;
+      const rawCropCanvas = cropCircleForOcr(c);
       const rawCtx = rawCropCanvas.getContext('2d');
-      rawCtx.drawImage(
-        cleanCanvas,
-        c.x - pad, c.y - pad, srcSize, srcSize,
-        0, 0, srcSize, srcSize
-      );
 
-      const detectedColors = extractRingColors(rawCtx, srcSize / 2, srcSize / 2, c.r * 0.55);
+      const detectedColors = extractRingColors(rawCtx, rawCropCanvas.width / 2, rawCropCanvas.height / 2, c.r * 0.55);
 
       let ocrText = "";
-      let extractedTags = [];
+      let candidates = [];
 
       if (worker) {
-        const ret = await worker.recognize(rawCropCanvas);
-        const words = extractWordsFromText(ret.data.text);
-        ocrText = words.join(' ');
-        extractedTags.push(...words);
+        const key = getCircleCacheKey(c);
+        let cached = stagedOcrCache.get(key);
+        let words = cached ? cached.words : null;
+
+        if (!words) {
+          const ret = await worker.recognize(rawCropCanvas);
+          words = Array.isArray(ret.data?.words) && ret.data.words.length > 0
+            ? ret.data.words
+            : String(ret.data?.text || '')
+                .split(/\s+/)
+                .filter(Boolean)
+                .map(text => ({ text, confidence: 65 }));
+          stagedOcrCache.set(key, { words });
+        }
+
+        const evaluated = evaluateCandidatesFromWords(words, threshold, existingTagsSet);
+        ocrText = evaluated.ocrText;
+        candidates = evaluated.candidates;
       }
 
       const thumbCanvas = document.createElement('canvas');
@@ -1546,37 +1858,40 @@
       thumbCtx.drawImage(rawCropCanvas, 0, 0, STORED_CAP_SIZE, STORED_CAP_SIZE);
 
       const imageBlob = await canvasToCompressedBlob(thumbCanvas);
-      const now = Date.now();
 
-      await activeDb.caps.add({
-        imageBlob: imageBlob,
-        colors: detectedColors,
-        ocrText: ocrText,
-        notes: "",
-        tags: [...new Set(extractedTags)],
-        sourceImagePath: activeSourceImagePath || "",
-        sourceFileHandle: activeSourceFileHandle || null,
-        sourceImageId: savedSourceImageId,
-        createdAt: now,
-        updatedAt: now
+      stagedItems.push({
+        imageBlob,
+        detectedColors,
+        ocrText,
+        candidates,
+        savedSourceImageId
       });
     }
 
     if (worker) await worker.terminate();
 
+    const finalizedItems = computeBatchTags(stagedItems, threshold, existingTagsSet);
+    const now = Date.now();
+
+    for (const item of finalizedItems) {
+      await activeDb.caps.add({
+        imageBlob: item.imageBlob,
+        colors: item.detectedColors,
+        ocrText: item.ocrText,
+        notes: "",
+        tags: item.tags,
+        sourceImagePath: activeSourceImagePath || "",
+        sourceFileHandle: activeSourceFileHandle || null,
+        sourceImageId: item.savedSourceImageId,
+        createdAt: now,
+        updatedAt: now
+      });
+    }
+
     btn.disabled = false;
     btn.innerText = "✅ Wytnij i zapisz wszystkie";
     closeStaging();
     renderCatalog();
-  }
-
-  function extractWordsFromText(text) {
-    const words = String(text || '')
-      .replace(/[^\p{L}\p{N}\s]/gu, ' ')
-      .split(/\s+/)
-      .map(w => w.trim().toLowerCase())
-      .filter(w => w.length >= 3);
-    return [...new Set(words)];
   }
 
   function classifySingleRgb(r, g, b) {
@@ -2273,20 +2588,12 @@
     const newOcrText = document.getElementById('modalOcrInput').value.trim();
     const newNotes = document.getElementById('modalNotesInput').value.trim();
 
-    const oldOcrWords = new Set(extractWordsFromText(cap.ocrText));
-    const newOcrWords = extractWordsFromText(newOcrText);
-    const newOcrWordSet = new Set(newOcrWords);
-
-    const preservedTags = modalDraftTags.filter(
-      t => !oldOcrWords.has(t.toLowerCase()) || newOcrWordSet.has(t.toLowerCase())
-    );
-
     cap.sourceImagePath = newSourcePath;
     cap.colors = [...new Set(modalDraftColors)];
     delete cap.color;
     cap.ocrText = newOcrText;
     cap.notes = newNotes;
-    cap.tags = [...new Set([...preservedTags, ...newOcrWords])];
+    cap.tags = [...new Set(modalDraftTags.map(t => t.trim().toLowerCase()).filter(Boolean))];
 
     await saveModifiedCap(cap);
     closeCapModal();
@@ -2363,16 +2670,7 @@
     const cap = await activeDb.caps.get(capId);
     if (!cap) return;
 
-    const oldOcrWords = new Set(extractWordsFromText(cap.ocrText));
-    const newOcrWords = extractWordsFromText(newText);
-    const newOcrWordSet = new Set(newOcrWords);
-
-    const preservedTags = (cap.tags || []).filter(
-      t => !oldOcrWords.has(t.toLowerCase()) || newOcrWordSet.has(t.toLowerCase())
-    );
-
     cap.ocrText = newText;
-    cap.tags = [...new Set([...preservedTags, ...newOcrWords])];
 
     await saveModifiedCap(cap);
     renderCatalog();
