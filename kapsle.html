@@ -1,0 +1,2414 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Katalog i Analizator Kapsli</title>
+  <!-- Dexie.js do lokalnej bazy danych IndexedDB -->
+  <script src="https://unpkg.com/dexie@3.2.4/dist/dexie.min.js"></script>
+  <!-- JSZip do zapisywania i otwierania archiwów ZIP -->
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <!-- Tesseract.js do lokalnego rozpoznawania tekstu OCR w przeglądarce -->
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+  <!-- OpenCV.js do wykrywania kapsli na zdjęciach -->
+  <script async src="https://docs.opencv.org/4.8.0/opencv.js" onload="onOpenCvReady();"></script>
+  <style>
+    :root {
+      --bg: #f1f5f9;
+      --surface: #ffffff;
+      --primary: #2563eb;
+      --primary-hover: #1d4ed8;
+      --danger: #dc2626;
+      --success: #16a34a;
+      --text: #0f172a;
+      --muted: #475569;
+      --border: #94a3b8;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      font-size: 18px;
+      line-height: 1.45;
+      background: var(--bg);
+      color: var(--text);
+      margin: 0;
+      padding: 22px;
+    }
+
+    .container { max-width: 1340px; margin: 0 auto; }
+
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 14px;
+      margin-bottom: 22px;
+    }
+
+    h1 { margin: 0; font-size: 1.8rem; }
+    .status-badge {
+      background: #e2e8f0;
+      padding: 8px 14px;
+      border-radius: 999px;
+      font-size: 0.95rem;
+      font-weight: 600;
+    }
+    .status-badge.ready { background: #dcfce7; color: #166534; }
+
+    .panel {
+      background: var(--surface);
+      border-radius: 12px;
+      padding: 20px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.1);
+      margin-bottom: 22px;
+    }
+
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+    }
+
+    input[type="text"], select, textarea {
+      padding: 10px 14px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-size: 1rem;
+      font-family: inherit;
+      color: var(--text);
+      background: #ffffff;
+    }
+
+    button {
+      padding: 10px 16px;
+      border: none;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      background: var(--primary);
+      color: white;
+      transition: background 0.15s;
+    }
+    button:hover:not(:disabled) { background: var(--primary-hover); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    button.secondary { background: #e2e8f0; color: var(--text); }
+    button.secondary:hover:not(:disabled) { background: #cbd5e1; }
+    button.success { background: var(--success); }
+    button.danger { background: var(--danger); }
+
+    /* Aktywne filtry kolorów */
+    .active-color-filters {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+    .color-filter-chip {
+      background: #dbeafe;
+      border: 1px solid #2563eb;
+      color: #1e3a8a;
+      font-size: 0.9rem;
+      font-weight: 600;
+      padding: 4px 10px;
+      border-radius: 999px;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .color-filter-chip .remove-tag {
+      cursor: pointer;
+      font-weight: bold;
+      font-size: 1rem;
+    }
+
+    /* Chmura tagów */
+    .tag-cloud-section {
+      margin-top: 16px;
+      padding-top: 16px;
+      border-top: 1px solid #e2e8f0;
+    }
+    .tag-cloud-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 10px;
+      font-size: 0.98rem;
+      font-weight: 600;
+      color: var(--muted);
+    }
+    .tag-cloud {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      max-height: 155px;
+      overflow-y: auto;
+      padding: 4px 0;
+    }
+    .cloud-tag {
+      background: #f1f5f9;
+      border: 1px solid #94a3b8;
+      color: #1e293b;
+      padding: 6px 12px;
+      border-radius: 999px;
+      font-size: 0.95rem;
+      cursor: pointer;
+      user-select: none;
+      transition: all 0.12s;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .cloud-tag:hover {
+      background: #e2e8f0;
+      border-color: #64748b;
+    }
+    .cloud-tag.active {
+      background: var(--primary);
+      border-color: var(--primary);
+      color: #ffffff;
+      font-weight: 600;
+    }
+    .cloud-tag .count {
+      font-size: 0.85rem;
+      opacity: 0.85;
+    }
+
+    /* Obszar roboczy wykrywania */
+    #stagingArea { display: none; border: 2px solid var(--primary); }
+    .staging-controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 18px;
+      align-items: center;
+      margin-bottom: 14px;
+      padding-bottom: 14px;
+      border-bottom: 1px solid #cbd5e1;
+      font-size: 1rem;
+    }
+    .canvas-wrapper {
+      position: relative;
+      display: inline-block;
+      max-width: 100%;
+      overflow: auto;
+      background: #1e293b;
+      border-radius: 8px;
+    }
+    #editorCanvas {
+      display: block;
+      max-width: 100%;
+      height: auto;
+      cursor: crosshair;
+      user-select: none;
+    }
+    .hint { font-size: 0.95rem; color: var(--muted); margin: 10px 0 0; }
+
+    /* Siatka katalogu */
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(205px, 1fr));
+      gap: 18px;
+    }
+    .cap-card {
+      position: relative;
+      background: var(--surface);
+      border-radius: 12px;
+      padding: 14px;
+      text-align: center;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.1);
+      border: 2px solid transparent;
+      cursor: pointer;
+      transition: transform 0.1s, border-color 0.1s;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+    .cap-card:hover { transform: translateY(-2px); }
+    .cap-card.selected {
+      border-color: var(--primary);
+      background: #eff6ff;
+    }
+    .zoom-btn {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      width: 34px;
+      height: 34px;
+      padding: 0;
+      border-radius: 999px;
+      background: rgba(15, 23, 42, 0.78);
+      color: #ffffff;
+      font-size: 1rem;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 2;
+    }
+    .zoom-btn:hover { background: var(--primary); }
+
+    .cap-card img {
+      width: 124px;
+      height: 124px;
+      object-fit: cover;
+      border-radius: 50%;
+      margin: 0 auto 12px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.18);
+    }
+
+    .note-indicator {
+      font-size: 0.88rem;
+      color: #334155;
+      background: #f8fafc;
+      border: 1px solid #cbd5e1;
+      border-radius: 6px;
+      padding: 6px 8px;
+      margin-bottom: 8px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    /* Edytowalna etykieta OCR */
+    .ocr-box {
+      margin-bottom: 10px;
+      min-height: 28px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .ocr-label {
+      font-size: 0.98rem;
+      font-weight: 700;
+      color: var(--text);
+      padding: 4px 8px;
+      border-radius: 6px;
+      border: 1px dashed transparent;
+      word-break: break-word;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .ocr-label:hover {
+      border-color: #64748b;
+      background: #f8fafc;
+    }
+    .ocr-label.empty {
+      color: var(--muted);
+      font-weight: 500;
+      font-style: italic;
+      font-size: 0.9rem;
+    }
+    .ocr-edit-input {
+      width: 100%;
+      padding: 6px 8px;
+      font-size: 0.95rem;
+      border: 1px solid var(--primary);
+      border-radius: 6px;
+      text-align: center;
+    }
+
+    .tags-wrap {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 6px;
+    }
+    .colors-wrap {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 5px;
+      margin-bottom: 8px;
+    }
+    .color-pill {
+      background: #fef3c7;
+      border: 1px solid #d97706;
+      color: #78350f;
+      font-size: 0.82rem;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 999px;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .tag {
+      background: #e2e8f0;
+      color: #1e293b;
+      font-size: 0.85rem;
+      font-weight: 500;
+      padding: 3px 9px;
+      border-radius: 6px;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .tag .remove-tag,
+    .color-pill .remove-tag {
+      cursor: pointer;
+      font-weight: bold;
+      font-size: 1rem;
+      color: #475569;
+    }
+    .tag .remove-tag:hover,
+    .color-pill .remove-tag:hover { color: var(--danger); }
+
+    .stats-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 14px;
+      font-size: 0.98rem;
+      color: var(--muted);
+    }
+
+    /* Modal powiększonego podglądu kapsla */
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(15, 23, 42, 0.65);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      z-index: 1000;
+    }
+    .modal-backdrop.open { display: flex; }
+
+    .modal-dialog {
+      background: var(--surface);
+      border-radius: 14px;
+      max-width: 780px;
+      width: 100%;
+      max-height: 90vh;
+      overflow-y: auto;
+      padding: 26px;
+      box-shadow: 0 20px 45px rgba(0, 0, 0, 0.28);
+    }
+    .modal-dialog.wide {
+      max-width: 920px;
+    }
+    .modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+      padding-bottom: 14px;
+      border-bottom: 1px solid #cbd5e1;
+    }
+    .modal-header h2 { margin: 0; font-size: 1.4rem; }
+    .modal-body {
+      display: grid;
+      grid-template-columns: 250px 1fr;
+      gap: 24px;
+      align-items: start;
+    }
+    @media (max-width: 640px) {
+      .modal-body { grid-template-columns: 1fr; justify-items: center; }
+    }
+    .modal-preview-wrap { text-align: center; }
+    .modal-preview-wrap img {
+      width: 220px;
+      height: 220px;
+      object-fit: cover;
+      border-radius: 50%;
+      box-shadow: 0 6px 18px rgba(0, 0, 0, 0.22);
+      border: 4px solid #e2e8f0;
+    }
+    .modal-meta {
+      margin-top: 14px;
+      font-size: 0.95rem;
+      color: var(--muted);
+      line-height: 1.55;
+    }
+    .source-box {
+      background: #f8fafc;
+      border: 1px solid #94a3b8;
+      border-radius: 8px;
+      padding: 12px 14px;
+      margin-bottom: 16px;
+      font-size: 0.95rem;
+    }
+    .source-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .source-status {
+      margin-top: 8px;
+      font-size: 0.9rem;
+      color: var(--muted);
+    }
+    .source-status.ok { color: var(--success); font-weight: 600; }
+    .source-status.missing { color: var(--danger); font-weight: 600; }
+
+    /* Lista kopii zapasowych obrazów źródłowych */
+    .backup-list {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .backup-item {
+      display: grid;
+      grid-template-columns: 92px 1fr auto;
+      gap: 16px;
+      align-items: center;
+      background: #f8fafc;
+      border: 1px solid #94a3b8;
+      border-radius: 10px;
+      padding: 12px 14px;
+    }
+    @media (max-width: 640px) {
+      .backup-item { grid-template-columns: 76px 1fr; }
+      .backup-item-actions { grid-column: 1 / -1; justify-content: flex-end; }
+    }
+    .backup-item img {
+      width: 92px;
+      height: 70px;
+      object-fit: cover;
+      border-radius: 6px;
+      border: 1px solid #94a3b8;
+      background: #e2e8f0;
+    }
+    .backup-item-title {
+      font-weight: 700;
+      font-size: 1rem;
+      word-break: break-all;
+    }
+    .backup-item-meta {
+      font-size: 0.9rem;
+      color: var(--muted);
+      margin-top: 4px;
+    }
+    .backup-item-actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .field-group { margin-bottom: 16px; }
+    .field-group label {
+      display: block;
+      font-size: 0.98rem;
+      font-weight: 600;
+      margin-bottom: 6px;
+      color: var(--text);
+    }
+    .field-group input[type="text"],
+    .field-group select,
+    .field-group textarea {
+      width: 100%;
+    }
+    .field-group textarea {
+      min-height: 90px;
+      resize: vertical;
+    }
+    .modal-footer {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+      margin-top: 20px;
+      padding-top: 16px;
+      border-top: 1px solid #cbd5e1;
+    }
+  </style>
+</head>
+<body>
+
+<datalist id="colorSuggestions">
+  <option value="czerwony"></option>
+  <option value="srebrny"></option>
+  <option value="złoty"></option>
+  <option value="biały"></option>
+  <option value="czarny"></option>
+  <option value="żółty"></option>
+  <option value="zielony"></option>
+  <option value="niebieski"></option>
+  <option value="pomarańczowy"></option>
+  <option value="fioletowy"></option>
+  <option value="brązowy"></option>
+  <option value="różowy"></option>
+</datalist>
+
+<div class="container">
+  <header>
+    <h1>🍺 Katalog i Analizator Kapsli</h1>
+    <div id="statusBadge" class="status-badge">Ładowanie silnika OpenCV...</div>
+  </header>
+
+  <!-- Krok 1: Wgrywanie zdjęć i kopia zapasowa ZIP -->
+  <div class="panel">
+    <div class="toolbar">
+      <input type="file" id="imageInput" accept="image/*" style="display:none;" onchange="handleFallbackFileInput(event)" />
+      <button id="uploadBtn" disabled onclick="pickSourceImage()">
+        📷 Wybierz zdjęcie kapsli
+      </button>
+
+      <label style="display:inline-flex; align-items:center; gap:7px; font-size:0.98rem; font-weight:500;">
+        <input type="checkbox" id="backupSourceImagesCheckbox" checked style="width:18px; height:18px;" />
+        Twórz kopię wgrywanych zdjęć
+      </label>
+
+      <button type="button" class="secondary" onclick="openBackupImagesModal()">
+        🖼️ Kopie obrazów (<span id="backupCountBadge">0</span>)
+      </button>
+
+      <div style="flex-grow:1;"></div>
+
+      <button class="secondary" onclick="exportZipDatabase()">📦 Zapisz ZIP</button>
+      <input type="file" id="importZipInput" accept=".zip" style="display:none;" onchange="importZipDatabase(event)" />
+      <button class="secondary" onclick="document.getElementById('importZipInput').click()">📂 Otwórz ZIP (zastąp)</button>
+    </div>
+  </div>
+
+  <!-- Krok 2: Interaktywny edytor wykrytych kapsli -->
+  <div id="stagingArea" class="panel">
+    <div class="staging-controls">
+      <strong>Zweryfikuj wykryte kapsle (znaleziono: <span id="detectedCount">0</span>)</strong>
+
+      <label style="display:inline-flex; align-items:center; gap:6px;">
+        Czułość tła:
+        <input type="range" id="sensitivitySlider" min="8" max="65" value="22" oninput="onSensitivityChange()" />
+        <span id="sensitivityVal">22</span>
+      </label>
+
+      <label style="display:inline-flex; align-items:center; gap:6px;">
+        <input type="checkbox" id="enableOcrCheckbox" checked style="width:18px; height:18px;" />
+        Odczytaj tekst OCR (wolniej)
+      </label>
+
+      <div style="margin-left:auto; display:flex; gap:8px;">
+        <button class="secondary" onclick="closeStaging()">Anuluj</button>
+        <button class="success" id="saveCapsBtn" onclick="processAndSaveDetectedCaps()">✅ Wytnij i zapisz wszystkie</button>
+      </div>
+    </div>
+
+    <div class="canvas-wrapper">
+      <canvas id="editorCanvas"></canvas>
+    </div>
+    <p class="hint">
+      <strong>Sterowanie edytorem:</strong> <strong>Kliknij środek i przeciągnij na zewnątrz</strong> na pustym miejscu, aby dodać nowy okrąg • <strong>Przeciągnij wnętrze</strong> okręgu, aby go przesunąć • <strong>Przeciągnij krawędź</strong> okręgu, aby zmienić jego rozmiar • <strong>Kliknij prawym przyciskiem (lub Shift+Klik)</strong>, aby usunąć okrąg.
+    </p>
+  </div>
+
+  <!-- Krok 3: Wyszukiwanie, filtrowanie, sortowanie, chmura tagów i grupowe tagowanie -->
+  <div class="panel">
+    <div class="toolbar" style="margin-bottom: 14px;">
+      <input type="text" id="searchInput" placeholder="Szukaj po tagach, kolorach, tekście OCR, notatkach..." style="min-width: 240px; flex: 1;" oninput="renderCatalog()" />
+
+      <div style="display:inline-flex; align-items:center; gap:6px;">
+        <input
+          type="text"
+          id="colorFilterCombobox"
+          list="colorSuggestions"
+          placeholder="Filtruj kolor (np. srebrny)..."
+          aria-label="Filtruj według koloru"
+          style="min-width: 210px;"
+          oninput="handleColorComboboxInput()"
+          onkeydown="handleColorComboboxKeydown(event)"
+        />
+        <button type="button" class="secondary" onclick="addColorFilterFromCombobox()" title="Dodaj kolor do filtrów">
+          + Kolor
+        </button>
+      </div>
+
+      <select id="sortSelect" aria-label="Sortuj kapsle" onchange="renderCatalog()">
+        <option value="updated_desc">Sortuj: Ostatnio modyfikowane</option>
+        <option value="date_desc">Sortuj: Data dodania (od najnowszych)</option>
+        <option value="date_asc">Sortuj: Data dodania (od najstarszych)</option>
+        <option value="tags_asc">Sortuj: Tagi (A–Z)</option>
+        <option value="tags_desc">Sortuj: Tagi (Z–A)</option>
+      </select>
+
+      <button class="secondary" onclick="selectAllVisible()">Zaznacz widoczne</button>
+      <button class="secondary" onclick="clearSelection()">Odznacz</button>
+    </div>
+
+    <div id="activeColorFiltersBar" class="active-color-filters" style="display:none;"></div>
+
+    <div class="toolbar" style="margin-bottom: 12px;">
+      <input type="text" id="bulkTagInput" placeholder="Dodaj własny tag do zaznaczonych (np. IPA, Polska, lata 90.)..." style="min-width: 280px; flex: 1;" onkeydown="if(event.key==='Enter'){event.preventDefault();applyBulkTag();}" />
+      <button onclick="applyBulkTag()">+ Dodaj tag do zaznaczonych (<span id="selectedCount">0</span>)</button>
+      <button class="danger" onclick="deleteSelectedCaps()">🗑️ Usuń zaznaczone</button>
+    </div>
+
+    <div class="toolbar">
+      <input
+        type="text"
+        id="bulkColorInput"
+        list="colorSuggestions"
+        placeholder="Dodaj kolor do zaznaczonych (np. czerwony, srebrny)..."
+        style="min-width: 280px; flex: 1;"
+        onkeydown="if(event.key==='Enter'){event.preventDefault();applyBulkColor();}"
+      />
+      <button type="button" class="secondary" onclick="applyBulkColor()">🎨 Dodaj kolor do zaznaczonych</button>
+    </div>
+
+    <!-- Chmura unikalnych tagów -->
+    <div class="tag-cloud-section">
+      <div class="tag-cloud-header">
+        <span>🏷️ Filtruj według chmury tagów (kliknij tagi, aby przefiltrować):</span>
+        <button id="clearTagFiltersBtn" class="secondary" style="padding: 5px 12px; font-size: 0.9rem; display: none;" onclick="clearTagFilters()">
+          Wyczyść filtry tagów
+        </button>
+      </div>
+      <div class="tag-cloud" id="tagCloud"></div>
+    </div>
+  </div>
+
+  <!-- Krok 4: Wyniki katalogu -->
+  <div class="stats-bar">
+    <span id="catalogStats">0 kapsli w katalogu</span>
+    <span>Kliknij kartę, aby zaznaczyć • Kliknij 🔍, aby powiększyć i edytować</span>
+  </div>
+  <div class="grid" id="capGrid"></div>
+</div>
+
+<!-- Okno powiększonego podglądu wybranego kapsla -->
+<div id="capModal" class="modal-backdrop" onclick="handleModalBackdropClick(event)">
+  <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <div class="modal-header">
+      <h2 id="modalTitle">Szczegóły kapsla</h2>
+      <button class="secondary" onclick="closeCapModal()" style="padding: 6px 12px;">✕</button>
+    </div>
+
+    <div class="modal-body">
+      <div class="modal-preview-wrap">
+        <img id="modalCapImage" src="" alt="Powiększony kapsel" />
+        <div class="modal-meta" id="modalCapMeta"></div>
+      </div>
+
+      <div>
+        <div class="source-box">
+          <label for="modalSourcePathInput" style="display:block; font-weight:600; margin-bottom:6px;">
+            Ścieżka / nazwa obrazu źródłowego:
+          </label>
+          <input
+            type="text"
+            id="modalSourcePathInput"
+            placeholder="np. arkusz1.jpg lub D:\Kapsle\arkusz1.jpg"
+            style="width:100%;"
+          />
+          <div class="source-actions">
+            <button type="button" class="secondary" onclick="copyCurrentModalSourcePath()" style="padding:7px 12px; font-size:0.9rem;">
+              📋 Kopiuj ścieżkę
+            </button>
+            <button type="button" class="primary" onclick="openCurrentModalBackedUpImage()" style="padding:7px 12px; font-size:0.9rem;">
+              🖼️ Otwórz kopię obrazu
+            </button>
+            <button type="button" class="secondary" onclick="openCurrentModalSourceFile()" style="padding:7px 12px; font-size:0.9rem;">
+              📂 Sprawdź plik z dysku
+            </button>
+          </div>
+          <div id="modalSourceStatus" class="source-status"></div>
+        </div>
+
+        <div class="field-group">
+          <label>Kolory kapsla</label>
+          <div class="colors-wrap" id="modalColorsList" style="justify-content: flex-start; margin-bottom: 10px;"></div>
+          <div class="toolbar">
+            <input
+              type="text"
+              id="modalNewColorInput"
+              list="colorSuggestions"
+              placeholder="Nowe kolory po przecinku (np. złoty, czarny)..."
+              style="flex: 1; min-width: 180px;"
+              onkeydown="handleModalColorKeydown(event)"
+            />
+            <button type="button" class="secondary" onclick="addColorsInModal()">+ Dodaj kolor</button>
+          </div>
+        </div>
+
+        <div class="field-group">
+          <label for="modalOcrInput">Tekst OCR / nazwa z kapsla</label>
+          <input type="text" id="modalOcrInput" placeholder="np. nazwa browaru lub napis..." />
+        </div>
+
+        <div class="field-group">
+          <label for="modalNotesInput">Notatki</label>
+          <textarea id="modalNotesInput" placeholder="Dodaj własne notatki (pochodzenie, wymiana, seria, stan)..."></textarea>
+        </div>
+
+        <div class="field-group">
+          <label>Przypisane tagi</label>
+          <div class="tags-wrap" id="modalTagsList" style="justify-content: flex-start; margin-bottom: 10px;"></div>
+          <div class="toolbar">
+            <input
+              type="text"
+              id="modalNewTagInput"
+              placeholder="Nowe tagi po przecinku..."
+              style="flex: 1; min-width: 180px;"
+              onkeydown="handleModalTagKeydown(event)"
+            />
+            <button type="button" class="secondary" onclick="addTagsInModal()">+ Dodaj tag</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-footer">
+      <button type="button" class="secondary" onclick="closeCapModal()">Anuluj</button>
+      <button type="button" class="success" onclick="saveCapModalChanges()">💾 Zapisz zmiany</button>
+    </div>
+  </div>
+</div>
+
+<!-- Okno zarządzania zapisanymi kopiami obrazów źródłowych -->
+<div id="backupImagesModal" class="modal-backdrop" onclick="handleBackupModalBackdropClick(event)">
+  <div class="modal-dialog wide" role="dialog" aria-modal="true" aria-labelledby="backupModalTitle">
+    <div class="modal-header">
+      <h2 id="backupModalTitle">🖼️ Kopie zapasowe obrazów źródłowych</h2>
+      <button class="secondary" onclick="closeBackupImagesModal()" style="padding: 6px 12px;">✕</button>
+    </div>
+
+    <p class="hint" style="margin-top:0; margin-bottom:16px;">
+      Kopie pełnych zdjęć źródłowych są zapisane lokalnie w bazie przeglądarki oraz dołączane do zapisywanego archiwum ZIP. Usunięcie kopii zwalnia pamięć, a kapsle zachowują swoje wycięte miniatury.
+    </p>
+
+    <div id="backupImagesList" class="backup-list"></div>
+
+    <div class="modal-footer">
+      <button type="button" class="secondary" onclick="closeBackupImagesModal()">Zamknij</button>
+    </div>
+  </div>
+</div>
+
+<!-- Ukryte płótno do czystego wycinania w pełnej rozdzielczości -->
+<canvas id="cleanCanvas" style="display:none;"></canvas>
+
+<script>
+  // ==========================================
+  // 1. KONFIGURACJA LOKALNEJ BAZY DANYCH (IndexedDB / Dexie)
+  // ==========================================
+  const db = new Dexie("BottleCapCatalogDB");
+  db.version(2).stores({
+    caps: "++id, *tags, *colors, ocrText, sourceImageId, createdAt, updatedAt",
+    sourceImages: "++id, name, createdAt"
+  });
+
+  const STORED_CAP_SIZE = 220;
+  const WEBP_QUALITY = 0.75;
+
+  const KNOWN_SINGLE_COLORS = [
+    "czerwony",
+    "srebrny",
+    "złoty",
+    "biały",
+    "czarny",
+    "żółty",
+    "zielony",
+    "niebieski",
+    "pomarańczowy",
+    "fioletowy",
+    "brązowy",
+    "różowy"
+  ];
+
+  function normalizeColorList(raw) {
+    const tokens = [];
+    const pushItem = (val) => {
+      if (!val) return;
+      String(val)
+        .split(/[,/]+/)
+        .map(part => part.trim().toLowerCase())
+        .filter(Boolean)
+        .forEach(part => tokens.push(part));
+    };
+
+    if (Array.isArray(raw)) {
+      raw.forEach(pushItem);
+    } else if (typeof raw === "string") {
+      pushItem(raw);
+    }
+
+    return [...new Set(tokens)];
+  }
+
+  function getCapColors(cap) {
+    if (Array.isArray(cap.colors) && cap.colors.length > 0) {
+      return normalizeColorList(cap.colors);
+    }
+    if (cap.color) {
+      return normalizeColorList(cap.color);
+    }
+    return [];
+  }
+
+  function getCapUpdatedAt(cap) {
+    return cap.updatedAt || cap.createdAt || 0;
+  }
+
+  async function saveModifiedCap(cap) {
+    cap.updatedAt = Date.now();
+    await db.caps.put(cap);
+  }
+
+  // Stan globalny
+  let cvReady = false;
+  let currentCircles = []; // { x, y, r }
+  let selectedCapIds = new Set();
+  let activeTagFilters = new Set();
+  let activeColorFilters = new Set();
+  let visibleCapIds = [];
+  let activeObjectUrls = [];
+  let backupModalObjectUrls = [];
+
+  // Źródło aktualnie edytowanego arkusza z kapslami
+  let activeSourceFileHandle = null;
+  let activeSourceImagePath = "";
+  let activeSourceFileBlob = null;
+  let activeSourceImageId = null;
+
+  // Stan modala powiększonego podglądu
+  let editingModalCapId = null;
+  let modalDraftTags = [];
+  let modalDraftColors = [];
+  let modalPreviewObjectUrl = null;
+  let modalSourceHandle = null;
+  let modalSourceImageId = null;
+
+  // Stan interaktywnego edytora
+  let dragMode = null;
+  let activeCircleIdx = -1;
+  let dragOffsetX = 0;
+  let dragOffsetY = 0;
+  const MIN_CIRCLE_RADIUS = 12;
+  const EDGE_GRAB_TOLERANCE = 10;
+
+  const cleanCanvas = document.getElementById('cleanCanvas');
+  const cleanCtx = cleanCanvas.getContext('2d');
+  const editorCanvas = document.getElementById('editorCanvas');
+  const editorCtx = editorCanvas.getContext('2d');
+
+  function onOpenCvReady() {
+    cvReady = true;
+    const badge = document.getElementById('statusBadge');
+    badge.innerText = "Gotowy (Silnik wizyjny załadowany)";
+    badge.classList.add('ready');
+    document.getElementById('uploadBtn').disabled = false;
+    renderCatalog();
+  }
+
+  function revokeActiveObjectUrls() {
+    activeObjectUrls.forEach(url => URL.revokeObjectURL(url));
+    activeObjectUrls = [];
+  }
+
+  function revokeBackupModalObjectUrls() {
+    backupModalObjectUrls.forEach(url => URL.revokeObjectURL(url));
+    backupModalObjectUrls = [];
+  }
+
+  async function updateBackupCountBadge() {
+    const count = await db.sourceImages.count();
+    document.getElementById('backupCountBadge').textContent = count;
+  }
+
+  function formatFileSize(bytes) {
+    if (!bytes || bytes <= 0) return '0 B';
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  }
+
+  function getCapImageSrc(cap, trackForGrid = true) {
+    if (cap.imageBlob instanceof Blob) {
+      const url = URL.createObjectURL(cap.imageBlob);
+      if (trackForGrid) {
+        activeObjectUrls.push(url);
+      }
+      return url;
+    }
+    return cap.image || '';
+  }
+
+  function canvasToCompressedBlob(canvas) {
+    return new Promise((resolve) => {
+      canvas.toBlob((blob) => {
+        if (blob) {
+          resolve(blob);
+          return;
+        }
+        canvas.toBlob((jpegBlob) => resolve(jpegBlob), 'image/jpeg', 0.75);
+      }, 'image/webp', WEBP_QUALITY);
+    });
+  }
+
+  function getImageExtensionFromBlob(blob) {
+    if (!blob || !blob.type) return 'webp';
+    if (blob.type.includes('png')) return 'png';
+    if (blob.type.includes('jpeg') || blob.type.includes('jpg')) return 'jpg';
+    if (blob.type.includes('webp')) return 'webp';
+    return 'bin';
+  }
+
+  function openBlobInNewTab(blob) {
+    const url = URL.createObjectURL(blob);
+    window.open(url, '_blank', 'noopener,noreferrer');
+    setTimeout(() => URL.revokeObjectURL(url), 15000);
+  }
+
+  // ==========================================
+  // 2. WCZYTYWANIE OBRAZU I WYKRYWANIE KAPSLI
+  // ==========================================
+  async function pickSourceImage() {
+    if (typeof window.showOpenFilePicker === 'function') {
+      try {
+        const [handle] = await window.showOpenFilePicker({
+          multiple: false,
+          types: [{
+            description: 'Obrazy',
+            accept: { 'image/*': ['.png', '.jpg', '.jpeg', '.webp'] }
+          }]
+        });
+        if (!handle) return;
+        const file = await handle.getFile();
+        activeSourceFileHandle = handle;
+        activeSourceImagePath = file.webkitRelativePath || handle.name || file.name;
+        activeSourceFileBlob = file;
+        activeSourceImageId = null;
+        loadImageFileIntoEditor(file);
+        return;
+      } catch (err) {
+        if (err && err.name === 'AbortError') return;
+      }
+    }
+    document.getElementById('imageInput').click();
+  }
+
+  function handleFallbackFileInput(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    activeSourceFileHandle = null;
+    activeSourceImagePath = file.webkitRelativePath || file.name;
+    activeSourceFileBlob = file;
+    activeSourceImageId = null;
+    loadImageFileIntoEditor(file);
+    e.target.value = '';
+  }
+
+  function loadImageFileIntoEditor(file) {
+    const img = new Image();
+    const tempUrl = URL.createObjectURL(file);
+    img.onload = () => {
+      const targetWidth = 1200;
+      const scale = Math.min(1, targetWidth / img.width);
+      cleanCanvas.width = Math.round(img.width * scale);
+      cleanCanvas.height = Math.round(img.height * scale);
+      cleanCtx.drawImage(img, 0, 0, cleanCanvas.width, cleanCanvas.height);
+
+      editorCanvas.width = cleanCanvas.width;
+      editorCanvas.height = cleanCanvas.height;
+      URL.revokeObjectURL(tempUrl);
+
+      document.getElementById('stagingArea').style.display = 'block';
+      runCapDetection();
+    };
+    img.src = tempUrl;
+  }
+
+  async function ensureSourceImageBackupSaved() {
+    const shouldBackup = document.getElementById('backupSourceImagesCheckbox').checked;
+    if (!shouldBackup || !(activeSourceFileBlob instanceof Blob)) {
+      return null;
+    }
+    if (activeSourceImageId != null) {
+      const existing = await db.sourceImages.get(activeSourceImageId);
+      if (existing) return activeSourceImageId;
+    }
+    const id = await db.sourceImages.add({
+      name: activeSourceImagePath || 'obraz-zrodlowy',
+      blob: activeSourceFileBlob,
+      size: activeSourceFileBlob.size || 0,
+      mimeType: activeSourceFileBlob.type || 'image/jpeg',
+      createdAt: Date.now()
+    });
+    activeSourceImageId = id;
+    await updateBackupCountBadge();
+    return id;
+  }
+
+  function onSensitivityChange() {
+    document.getElementById('sensitivityVal').innerText = document.getElementById('sensitivitySlider').value;
+    runCapDetection();
+  }
+
+  function runCapDetection() {
+    if (!cvReady) return;
+
+    let src = cv.imread(cleanCanvas);
+    let lab = new cv.Mat();
+    cv.cvtColor(src, lab, cv.COLOR_RGBA2RGB);
+    cv.cvtColor(lab, lab, cv.COLOR_RGB2Lab);
+
+    const margin = 12;
+    const corners = [
+      lab.ucharPtr(margin, margin),
+      lab.ucharPtr(margin, lab.cols - margin),
+      lab.ucharPtr(lab.rows - margin, margin),
+      lab.ucharPtr(lab.rows - margin, lab.cols - margin)
+    ];
+    let bgL = 0, bgA = 0, bgB = 0;
+    corners.forEach(p => { bgL += p[0]; bgA += p[1]; bgB += p[2]; });
+    bgL /= 4; bgA /= 4; bgB /= 4;
+
+    let mask = new cv.Mat.zeros(lab.rows, lab.cols, cv.CV_8UC1);
+    const sensitivity = parseInt(document.getElementById('sensitivitySlider').value, 10);
+
+    for (let r = 0; r < lab.rows; r++) {
+      for (let c = 0; c < lab.cols; c++) {
+        let p = lab.ucharPtr(r, c);
+        let dL = (p[0] - bgL) * 0.55;
+        let dA = (p[1] - bgA) * 1.6;
+        let dB = (p[2] - bgB) * 1.6;
+        if (Math.sqrt(dL * dL + dA * dA + dB * dB) > sensitivity) {
+          mask.ucharPtr(r, c)[0] = 255;
+        }
+      }
+    }
+
+    let kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(15, 15));
+    cv.morphologyEx(mask, mask, cv.MORPH_CLOSE, kernel);
+    cv.morphologyEx(mask, mask, cv.MORPH_OPEN, kernel);
+
+    let dist = new cv.Mat();
+    cv.distanceTransform(mask, dist, cv.DIST_L2, 5);
+    cv.normalize(dist, dist, 0, 1.0, cv.NORM_MINMAX);
+
+    let sureFg = new cv.Mat();
+    cv.threshold(dist, sureFg, 0.55, 255, cv.THRESH_BINARY);
+    sureFg.convertTo(sureFg, cv.CV_8U);
+
+    let contours = new cv.MatVector();
+    let hierarchy = new cv.Mat();
+    cv.findContours(sureFg, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+    let candidates = [];
+    for (let i = 0; i < contours.size(); i++) {
+      let cnt = contours.get(i);
+      if (cv.contourArea(cnt) < 120) continue;
+      let circle = cv.minEnclosingCircle(cnt);
+      candidates.push({
+        x: circle.center.x,
+        y: circle.center.y,
+        r: Math.max(MIN_CIRCLE_RADIUS, circle.radius * 1.82)
+      });
+    }
+
+    currentCircles = [];
+    if (candidates.length > 0) {
+      const sortedR = candidates.map(c => c.r).sort((a, b) => a - b);
+      const medianR = sortedR[Math.floor(sortedR.length / 2)];
+      currentCircles = candidates.filter(
+        c => c.r >= medianR * 0.65 && c.r <= medianR * 1.35
+      );
+    }
+
+    src.delete(); lab.delete(); mask.delete();
+    kernel.delete(); dist.delete(); sureFg.delete();
+    contours.delete(); hierarchy.delete();
+
+    drawEditorCanvas();
+  }
+
+  // ==========================================
+  // 3. INTERAKTYWNY EDYTOR OKRĘGÓW
+  // ==========================================
+  function drawEditorCanvas() {
+    editorCtx.clearRect(0, 0, editorCanvas.width, editorCanvas.height);
+    editorCtx.drawImage(cleanCanvas, 0, 0);
+
+    currentCircles.forEach((c, idx) => {
+      const isActive = idx === activeCircleIdx;
+
+      editorCtx.beginPath();
+      editorCtx.arc(c.x, c.y, c.r, 0, Math.PI * 2);
+      editorCtx.lineWidth = isActive ? 4 : 3;
+      editorCtx.strokeStyle = isActive ? '#38bdf8' : '#22c55e';
+      editorCtx.stroke();
+
+      editorCtx.fillStyle = isActive ? 'rgba(56, 189, 248, 0.20)' : 'rgba(34, 197, 94, 0.15)';
+      editorCtx.fill();
+
+      editorCtx.beginPath();
+      editorCtx.arc(c.x, c.y, 3, 0, Math.PI * 2);
+      editorCtx.fillStyle = isActive ? '#38bdf8' : '#22c55e';
+      editorCtx.fill();
+
+      editorCtx.fillStyle = isActive ? '#0284c7' : '#16a34a';
+      editorCtx.font = 'bold 14px sans-serif';
+      editorCtx.fillText(`#${idx + 1}`, c.x - 10, c.y - 6);
+    });
+
+    document.getElementById('detectedCount').innerText = currentCircles.length;
+  }
+
+  function getCanvasCoords(e) {
+    const rect = editorCanvas.getBoundingClientRect();
+    const scaleX = editorCanvas.width / rect.width;
+    const scaleY = editorCanvas.height / rect.height;
+    return {
+      x: (e.clientX - rect.left) * scaleX,
+      y: (e.clientY - rect.top) * scaleY
+    };
+  }
+
+  function findHitCircle(pos) {
+    for (let i = currentCircles.length - 1; i >= 0; i--) {
+      const c = currentCircles[i];
+      const dist = Math.hypot(c.x - pos.x, c.y - pos.y);
+      if (Math.abs(dist - c.r) <= EDGE_GRAB_TOLERANCE) {
+        return { index: i, zone: 'edge', dist };
+      }
+      if (dist < c.r) {
+        return { index: i, zone: 'inside', dist };
+      }
+    }
+    return null;
+  }
+
+  editorCanvas.addEventListener('mousedown', (e) => {
+    const pos = getCanvasCoords(e);
+    const hit = findHitCircle(pos);
+
+    if (e.shiftKey && hit) {
+      currentCircles.splice(hit.index, 1);
+      activeCircleIdx = -1;
+      drawEditorCanvas();
+      return;
+    }
+
+    if (e.button !== 0) return;
+
+    if (hit) {
+      activeCircleIdx = hit.index;
+      if (hit.zone === 'edge') {
+        dragMode = 'resize';
+      } else {
+        dragMode = 'move';
+        dragOffsetX = pos.x - currentCircles[hit.index].x;
+        dragOffsetY = pos.y - currentCircles[hit.index].y;
+      }
+      drawEditorCanvas();
+    } else {
+      const defaultR = currentCircles.length > 0
+        ? currentCircles[currentCircles.length - 1].r
+        : 45;
+      currentCircles.push({ x: pos.x, y: pos.y, r: defaultR });
+      activeCircleIdx = currentCircles.length - 1;
+      dragMode = 'create';
+      drawEditorCanvas();
+    }
+  });
+
+  editorCanvas.addEventListener('mousemove', (e) => {
+    const pos = getCanvasCoords(e);
+
+    if (!dragMode) {
+      const hoverHit = findHitCircle(pos);
+      if (!hoverHit) {
+        editorCanvas.style.cursor = 'crosshair';
+      } else if (hoverHit.zone === 'edge') {
+        editorCanvas.style.cursor = 'nwse-resize';
+      } else {
+        editorCanvas.style.cursor = 'grab';
+      }
+      return;
+    }
+
+    if (activeCircleIdx < 0 || activeCircleIdx >= currentCircles.length) return;
+    const circle = currentCircles[activeCircleIdx];
+
+    if (dragMode === 'move') {
+      circle.x = Math.max(0, Math.min(editorCanvas.width, pos.x - dragOffsetX));
+      circle.y = Math.max(0, Math.min(editorCanvas.height, pos.y - dragOffsetY));
+    } else if (dragMode === 'create' || dragMode === 'resize') {
+      const newRadius = Math.hypot(pos.x - circle.x, pos.y - circle.y);
+      circle.r = Math.max(MIN_CIRCLE_RADIUS, newRadius);
+    }
+
+    drawEditorCanvas();
+  });
+
+  window.addEventListener('mouseup', () => {
+    if (dragMode) {
+      dragMode = null;
+      activeCircleIdx = -1;
+      drawEditorCanvas();
+    }
+  });
+
+  editorCanvas.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    const pos = getCanvasCoords(e);
+    const hit = findHitCircle(pos);
+    if (hit) {
+      currentCircles.splice(hit.index, 1);
+      activeCircleIdx = -1;
+      drawEditorCanvas();
+    }
+  });
+
+  function closeStaging() {
+    dragMode = null;
+    activeCircleIdx = -1;
+    document.getElementById('stagingArea').style.display = 'none';
+    currentCircles = [];
+  }
+
+  // ==========================================
+  // 4. EKSTRAKCJA CECH (WIELE KOLORÓW I OCR) ORAZ ZAPIS (WEBP BLOB)
+  // ==========================================
+  async function processAndSaveDetectedCaps() {
+    if (currentCircles.length === 0) return;
+
+    const btn = document.getElementById('saveCapsBtn');
+    const runOcr = document.getElementById('enableOcrCheckbox').checked;
+    btn.disabled = true;
+
+    const savedSourceImageId = await ensureSourceImageBackupSaved();
+
+    let worker = null;
+    if (runOcr) {
+      btn.innerText = "⏳ Inicjalizacja OCR...";
+      worker = await Tesseract.createWorker(['pol', 'eng']);
+    }
+
+    for (let i = 0; i < currentCircles.length; i++) {
+      btn.innerText = `⏳ Przetwarzanie kapsla ${i + 1} z ${currentCircles.length}...`;
+      const c = currentCircles[i];
+
+      const pad = c.r * 1.08;
+      const srcSize = Math.max(16, Math.round(pad * 2));
+
+      const rawCropCanvas = document.createElement('canvas');
+      rawCropCanvas.width = srcSize;
+      rawCropCanvas.height = srcSize;
+      const rawCtx = rawCropCanvas.getContext('2d');
+      rawCtx.drawImage(
+        cleanCanvas,
+        c.x - pad, c.y - pad, srcSize, srcSize,
+        0, 0, srcSize, srcSize
+      );
+
+      const detectedColors = extractRingColors(rawCtx, srcSize / 2, srcSize / 2, c.r * 0.55);
+
+      let ocrText = "";
+      let extractedTags = [];
+
+      if (worker) {
+        const ret = await worker.recognize(rawCropCanvas);
+        const words = extractWordsFromText(ret.data.text);
+        ocrText = words.join(' ');
+        extractedTags.push(...words);
+      }
+
+      const thumbCanvas = document.createElement('canvas');
+      thumbCanvas.width = STORED_CAP_SIZE;
+      thumbCanvas.height = STORED_CAP_SIZE;
+      const thumbCtx = thumbCanvas.getContext('2d');
+      thumbCtx.drawImage(rawCropCanvas, 0, 0, STORED_CAP_SIZE, STORED_CAP_SIZE);
+
+      const imageBlob = await canvasToCompressedBlob(thumbCanvas);
+      const now = Date.now();
+
+      await db.caps.add({
+        imageBlob: imageBlob,
+        colors: detectedColors,
+        ocrText: ocrText,
+        notes: "",
+        tags: [...new Set(extractedTags)],
+        sourceImagePath: activeSourceImagePath || "",
+        sourceFileHandle: activeSourceFileHandle || null,
+        sourceImageId: savedSourceImageId,
+        createdAt: now,
+        updatedAt: now
+      });
+    }
+
+    if (worker) await worker.terminate();
+
+    btn.disabled = false;
+    btn.innerText = "✅ Wytnij i zapisz wszystkie";
+    closeStaging();
+    renderCatalog();
+  }
+
+  function extractWordsFromText(text) {
+    const words = String(text || '')
+      .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+      .split(/\s+/)
+      .map(w => w.trim().toLowerCase())
+      .filter(w => w.length >= 3);
+    return [...new Set(words)];
+  }
+
+  function classifySingleRgb(r, g, b) {
+    r /= 255; g /= 255; b /= 255;
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    const l = (max + min) / 2;
+    let h = 0, s = 0;
+
+    if (max !== min) {
+      const d = max - min;
+      s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+      switch (max) {
+        case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+        case g: h = (b - r) / d + 2; break;
+        case b: h = (r - g) / d + 4; break;
+      }
+      h *= 60;
+    }
+
+    if (l < 0.20) return { color: 'czarny', isSilver: false };
+    if (s < 0.16) {
+      return { color: l > 0.68 ? 'biały' : (l > 0.45 ? 'srebrny' : 'czarny'), isSilver: l > 0.45 && l <= 0.78 };
+    }
+    if (l > 0.78 && s < 0.28) return { color: 'biały', isSilver: true };
+    if (h < 16 || h >= 342) return { color: 'czerwony', isSilver: false };
+    if (h < 38) return { color: 'pomarańczowy', isSilver: false };
+    if (h < 68) return { color: 'żółty', isSilver: false };
+    if (h < 165) return { color: 'zielony', isSilver: false };
+    if (h < 258) return { color: 'niebieski', isSilver: false };
+    if (h < 315) return { color: 'fioletowy', isSilver: false };
+    return { color: 'różowy', isSilver: false };
+  }
+
+  function extractRingColors(ctx, cx, cy, radius) {
+    const samples = 48;
+    const counts = new Map();
+    let silverSamples = 0;
+
+    for (let i = 0; i < samples; i++) {
+      const angle = (i / samples) * Math.PI * 2;
+      const x = Math.max(0, Math.min(ctx.canvas.width - 1, Math.round(cx + Math.cos(angle) * radius)));
+      const y = Math.max(0, Math.min(ctx.canvas.height - 1, Math.round(cy + Math.sin(angle) * radius)));
+      const pixel = ctx.getImageData(x, y, 1, 1).data;
+      const info = classifySingleRgb(pixel[0], pixel[1], pixel[2]);
+      counts.set(info.color, (counts.get(info.color) || 0) + 1);
+      if (info.isSilver) silverSamples++;
+    }
+
+    if (silverSamples >= 8) {
+      counts.set('srebrny', Math.max(counts.get('srebrny') || 0, silverSamples));
+    }
+
+    const ranked = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+    if (ranked.length === 0) return ['srebrny'];
+
+    const [topColor, topCount] = ranked[0];
+    const result = [topColor];
+
+    for (let i = 1; i < ranked.length && result.length < 3; i++) {
+      const [cName, cCount] = ranked[i];
+      if (cCount >= 6 && cCount >= topCount * 0.25) {
+        result.push(cName);
+      }
+    }
+
+    return [...new Set(result)];
+  }
+
+  // ==========================================
+  // 5. FILTROWANIE KOLORAMI (COMBOBOX), CHMURA TAGÓW, SORTOWANIE I KATALOG
+  // ==========================================
+  function populateColorSuggestions(allCaps) {
+    const uniqueColors = new Set(KNOWN_SINGLE_COLORS);
+    allCaps.forEach(cap => {
+      getCapColors(cap).forEach(c => uniqueColors.add(c));
+    });
+
+    const datalist = document.getElementById('colorSuggestions');
+    datalist.innerHTML = '';
+    [...uniqueColors]
+      .sort((a, b) => a.localeCompare(b, 'pl'))
+      .forEach(color => {
+        const opt = document.createElement('option');
+        opt.value = color;
+        datalist.appendChild(opt);
+      });
+  }
+
+  function addColorFilter(rawColor) {
+    const clean = String(rawColor || '').trim().toLowerCase();
+    if (!clean) return;
+    activeColorFilters.add(clean);
+    document.getElementById('colorFilterCombobox').value = '';
+    renderCatalog();
+  }
+
+  function addColorFilterFromCombobox() {
+    const input = document.getElementById('colorFilterCombobox');
+    addColorFilter(input.value);
+  }
+
+  function handleColorComboboxInput() {
+    const input = document.getElementById('colorFilterCombobox');
+    const val = input.value.trim().toLowerCase();
+    if (!val) return;
+    const optionExists = [...document.getElementById('colorSuggestions').options]
+      .some(opt => opt.value.toLowerCase() === val);
+    if (optionExists) {
+      addColorFilter(val);
+    }
+  }
+
+  function handleColorComboboxKeydown(e) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      addColorFilterFromCombobox();
+    }
+  }
+
+  function removeColorFilter(colorToRemove) {
+    activeColorFilters.delete(colorToRemove);
+    renderCatalog();
+  }
+
+  function clearColorFilters() {
+    activeColorFilters.clear();
+    renderCatalog();
+  }
+
+  function renderActiveColorFiltersBar() {
+    const bar = document.getElementById('activeColorFiltersBar');
+    if (activeColorFilters.size === 0) {
+      bar.style.display = 'none';
+      bar.innerHTML = '';
+      return;
+    }
+
+    bar.style.display = 'flex';
+    const chipsHtml = [...activeColorFilters].map(col => `
+      <span class="color-filter-chip">
+        🎨 ${escapeHtml(col)}
+        <span class="remove-tag" title="Usuń filtr koloru" onclick="removeColorFilter('${escapeJsString(col)}')">&times;</span>
+      </span>
+    `).join('');
+
+    bar.innerHTML = `
+      <span style="font-size:0.95rem; font-weight:600; color:var(--muted);">Filtry kolorów:</span>
+      ${chipsHtml}
+      <button type="button" class="secondary" style="padding:4px 10px; font-size:0.85rem;" onclick="clearColorFilters()">
+        Wyczyść kolory
+      </button>
+    `;
+  }
+
+  function renderTagCloud(allCaps) {
+    const tagCounts = new Map();
+    allCaps.forEach(cap => {
+      (cap.tags || []).forEach(tag => {
+        const clean = tag.trim().toLowerCase();
+        if (clean) {
+          tagCounts.set(clean, (tagCounts.get(clean) || 0) + 1);
+        }
+      });
+    });
+
+    for (const activeTag of [...activeTagFilters]) {
+      if (!tagCounts.has(activeTag)) {
+        activeTagFilters.delete(activeTag);
+      }
+    }
+
+    const cloudEl = document.getElementById('tagCloud');
+    const clearBtn = document.getElementById('clearTagFiltersBtn');
+    clearBtn.style.display = activeTagFilters.size > 0 ? 'inline-block' : 'none';
+
+    if (tagCounts.size === 0) {
+      cloudEl.innerHTML = '<span style="font-size:0.95rem; color:#64748b;">Brak przypisanych tagów.</span>';
+      return;
+    }
+
+    const sortedTags = [...tagCounts.entries()].sort((a, b) => {
+      if (b[1] !== a[1]) return b[1] - a[1];
+      return a[0].localeCompare(b[0], 'pl');
+    });
+
+    cloudEl.innerHTML = '';
+    sortedTags.forEach(([tag, count]) => {
+      const chip = document.createElement('span');
+      const isActive = activeTagFilters.has(tag);
+      chip.className = `cloud-tag ${isActive ? 'active' : ''}`;
+      chip.innerHTML = `${escapeHtml(tag)} <span class="count">(${count})</span>`;
+      chip.onclick = () => {
+        if (activeTagFilters.has(tag)) {
+          activeTagFilters.delete(tag);
+        } else {
+          activeTagFilters.add(tag);
+        }
+        renderCatalog();
+      };
+      cloudEl.appendChild(chip);
+    });
+  }
+
+  function clearTagFilters() {
+    activeTagFilters.clear();
+    renderCatalog();
+  }
+
+  function getTagSortKey(cap) {
+    const tags = (cap.tags || [])
+      .map(t => String(t).trim().toLowerCase())
+      .filter(Boolean)
+      .sort((a, b) => a.localeCompare(b, 'pl'));
+    return tags[0] || '\uffff';
+  }
+
+  function sortCapsList(caps, sortMode) {
+    const list = [...caps];
+    switch (sortMode) {
+      case 'updated_desc':
+        return list.sort((a, b) => getCapUpdatedAt(b) - getCapUpdatedAt(a) || (b.id || 0) - (a.id || 0));
+      case 'date_asc':
+        return list.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0) || (a.id || 0) - (b.id || 0));
+      case 'tags_asc':
+        return list.sort((a, b) => {
+          const cmp = getTagSortKey(a).localeCompare(getTagSortKey(b), 'pl');
+          return cmp !== 0 ? cmp : getCapUpdatedAt(b) - getCapUpdatedAt(a);
+        });
+      case 'tags_desc':
+        return list.sort((a, b) => {
+          const keyA = getTagSortKey(a);
+          const keyB = getTagSortKey(b);
+          if (keyA === '\uffff' && keyB !== '\uffff') return 1;
+          if (keyB === '\uffff' && keyA !== '\uffff') return -1;
+          const cmp = keyB.localeCompare(keyA, 'pl');
+          return cmp !== 0 ? cmp : getCapUpdatedAt(b) - getCapUpdatedAt(a);
+        });
+      case 'date_desc':
+      default:
+        return list.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0) || (b.id || 0) - (a.id || 0));
+    }
+  }
+
+  async function renderCatalog() {
+    const query = document.getElementById('searchInput').value.toLowerCase().trim();
+    const sortMode = document.getElementById('sortSelect').value;
+
+    await updateBackupCountBadge();
+    const allCaps = await db.caps.toArray();
+    populateColorSuggestions(allCaps);
+    renderActiveColorFiltersBar();
+    renderTagCloud(allCaps);
+
+    let caps = allCaps;
+
+    if (activeColorFilters.size > 0) {
+      caps = caps.filter(c => {
+        const capColorSet = new Set(getCapColors(c).map(col => col.toLowerCase()));
+        for (const requiredColor of activeColorFilters) {
+          if (!capColorSet.has(requiredColor)) return false;
+        }
+        return true;
+      });
+    }
+
+    if (activeTagFilters.size > 0) {
+      caps = caps.filter(c => {
+        const capTags = new Set((c.tags || []).map(t => t.toLowerCase()));
+        for (const requiredTag of activeTagFilters) {
+          if (!capTags.has(requiredTag)) return false;
+        }
+        return true;
+      });
+    }
+
+    if (query) {
+      caps = caps.filter(c =>
+        (c.tags || []).some(t => t.toLowerCase().includes(query)) ||
+        getCapColors(c).some(col => col.toLowerCase().includes(query)) ||
+        (c.ocrText && c.ocrText.toLowerCase().includes(query)) ||
+        (c.notes && c.notes.toLowerCase().includes(query)) ||
+        (c.sourceImagePath && c.sourceImagePath.toLowerCase().includes(query))
+      );
+    }
+
+    caps = sortCapsList(caps, sortMode);
+
+    revokeActiveObjectUrls();
+    visibleCapIds = caps.map(c => c.id);
+    document.getElementById('catalogStats').innerText = `Wyświetlono ${caps.length} z ${allCaps.length} kapsli`;
+    document.getElementById('selectedCount').innerText = selectedCapIds.size;
+
+    const grid = document.getElementById('capGrid');
+    grid.innerHTML = '';
+
+    caps.forEach(cap => {
+      const card = document.createElement('div');
+      card.className = `cap-card ${selectedCapIds.has(cap.id) ? 'selected' : ''}`;
+      card.onclick = (e) => {
+        if (e.target.closest('.remove-tag') || e.target.closest('.ocr-box') || e.target.closest('.zoom-btn') || e.target.closest('.colors-wrap')) return;
+        selectedCapIds.has(cap.id) ? selectedCapIds.delete(cap.id) : selectedCapIds.add(cap.id);
+        renderCatalog();
+      };
+
+      const capColors = getCapColors(cap);
+      const colorsHtml = capColors.map(col => `
+        <span class="color-pill">
+          ${escapeHtml(col)}
+          <span class="remove-tag" title="Usuń kolor" onclick="removeColorFromCap(${cap.id}, '${escapeJsString(col)}')">&times;</span>
+        </span>
+      `).join('');
+
+      const tagsHtml = (cap.tags || []).map(t => `
+        <span class="tag">
+          ${escapeHtml(t)}
+          <span class="remove-tag" title="Usuń tag" onclick="removeTagFromCap(${cap.id}, '${escapeJsString(t)}')">&times;</span>
+        </span>
+      `).join('');
+
+      const hasOcr = cap.ocrText && cap.ocrText.trim().length > 0;
+      const ocrDisplayHtml = hasOcr
+        ? `<div class="ocr-label" title="Kliknij, aby edytować tekst OCR">"${escapeHtml(cap.ocrText)}" ✏️</div>`
+        : `<div class="ocr-label empty" title="Kliknij, aby dodać lub edytować tekst">+ Dodaj tekst OCR ✏️</div>`;
+
+      const noteHtml = cap.notes && cap.notes.trim().length > 0
+        ? `<div class="note-indicator" title="${escapeHtml(cap.notes)}">📝 ${escapeHtml(cap.notes)}</div>`
+        : '';
+
+      const imgSrc = getCapImageSrc(cap, true);
+
+      card.innerHTML = `
+        <button type="button" class="zoom-btn" title="Powiększ i edytuj kapsel" onclick="openCapModal(${cap.id})">🔍</button>
+        <div>
+          <img src="${imgSrc}" alt="Kapsel" />
+          <div class="ocr-box" id="ocr-box-${cap.id}">${ocrDisplayHtml}</div>
+          ${noteHtml}
+        </div>
+        <div>
+          <div class="colors-wrap">${colorsHtml}</div>
+          <div class="tags-wrap">${tagsHtml}</div>
+        </div>
+      `;
+
+      const ocrBox = card.querySelector(`#ocr-box-${cap.id}`);
+      ocrBox.onclick = (e) => {
+        e.stopPropagation();
+        startEditingOcr(cap.id, cap.ocrText || '', ocrBox);
+      };
+
+      grid.appendChild(card);
+    });
+  }
+
+  // ==========================================
+  // 5B. POWIĘKSZONY PODGLĄD KAPSLĄ (MODAL) + KOPIA OBRAZU ŹRÓDŁOWEGO
+  // ==========================================
+  async function openCapModal(capId) {
+    const cap = await db.caps.get(capId);
+    if (!cap) return;
+
+    if (modalPreviewObjectUrl) {
+      URL.revokeObjectURL(modalPreviewObjectUrl);
+      modalPreviewObjectUrl = null;
+    }
+
+    editingModalCapId = cap.id;
+    modalDraftTags = [...(cap.tags || [])];
+    modalDraftColors = getCapColors(cap);
+    modalSourceHandle = cap.sourceFileHandle || null;
+    modalSourceImageId = cap.sourceImageId || null;
+
+    const imgEl = document.getElementById('modalCapImage');
+    const src = getCapImageSrc(cap, false);
+    if (cap.imageBlob instanceof Blob && src.startsWith('blob:')) {
+      modalPreviewObjectUrl = src;
+    }
+    imgEl.src = src;
+
+    const createdStr = cap.createdAt
+      ? new Date(cap.createdAt).toLocaleString('pl-PL')
+      : 'brak daty';
+    const updatedStr = getCapUpdatedAt(cap)
+      ? new Date(getCapUpdatedAt(cap)).toLocaleString('pl-PL')
+      : 'brak daty';
+    document.getElementById('modalTitle').innerText = `Kapsel #${cap.id}`;
+    document.getElementById('modalCapMeta').innerHTML = `
+      <strong>Dodano:</strong> ${escapeHtml(createdStr)}<br />
+      <strong>Zmodyfikowano:</strong> ${escapeHtml(updatedStr)}
+    `;
+
+    const pathInput = document.getElementById('modalSourcePathInput');
+    const statusEl = document.getElementById('modalSourceStatus');
+    pathInput.value = cap.sourceImagePath || "";
+    statusEl.className = 'source-status';
+
+    const backupExists = modalSourceImageId != null && Boolean(await db.sourceImages.get(modalSourceImageId));
+    if (backupExists) {
+      statusEl.classList.add('ok');
+      statusEl.textContent = "Dostępna kopia zapasowa pełnego obrazu w bazie — kliknij „Otwórz kopię obrazu”.";
+    } else if (modalSourceHandle) {
+      statusEl.textContent = "Brak kopii w bazie, ale zapisano uchwyt pliku — kliknij „Sprawdź plik z dysku”.";
+    } else {
+      statusEl.textContent = "Przeglądarka ukrywa pełną ścieżkę dysku (np. C:\\...) — możesz wkleić ją ręcznie powyżej.";
+    }
+
+    document.getElementById('modalNewColorInput').value = '';
+    document.getElementById('modalOcrInput').value = cap.ocrText || '';
+    document.getElementById('modalNotesInput').value = cap.notes || '';
+    document.getElementById('modalNewTagInput').value = '';
+
+    renderModalColors();
+    renderModalTags();
+    document.getElementById('capModal').classList.add('open');
+  }
+
+  function renderModalColors() {
+    const container = document.getElementById('modalColorsList');
+    if (modalDraftColors.length === 0) {
+      container.innerHTML = '<span style="font-size:0.92rem; color:var(--muted);">Brak kolorów</span>';
+      return;
+    }
+    container.innerHTML = modalDraftColors.map(c => `
+      <span class="color-pill">
+        ${escapeHtml(c)}
+        <span class="remove-tag" title="Usuń kolor" onclick="removeColorInModal('${escapeJsString(c)}')">&times;</span>
+      </span>
+    `).join('');
+  }
+
+  function addColorsInModal() {
+    const input = document.getElementById('modalNewColorInput');
+    const newOnes = normalizeColorList(input.value);
+    if (newOnes.length === 0) return;
+
+    modalDraftColors = [...new Set([...modalDraftColors, ...newOnes])];
+    input.value = '';
+    renderModalColors();
+  }
+
+  function handleModalColorKeydown(e) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      addColorsInModal();
+    }
+  }
+
+  function removeColorInModal(colorToRemove) {
+    modalDraftColors = modalDraftColors.filter(c => c !== colorToRemove);
+    renderModalColors();
+  }
+
+  async function openCurrentModalBackedUpImage() {
+    const statusEl = document.getElementById('modalSourceStatus');
+    statusEl.className = 'source-status';
+
+    if (modalSourceImageId == null) {
+      statusEl.classList.add('missing');
+      statusEl.textContent = "Ten kapsel nie ma przypisanej kopii zapasowej obrazu źródłowego.";
+      return;
+    }
+
+    const backup = await db.sourceImages.get(modalSourceImageId);
+    if (!backup || !(backup.blob instanceof Blob)) {
+      statusEl.classList.add('missing');
+      statusEl.textContent = "Kopia zapasowa tego obrazu została usunięta.";
+      return;
+    }
+
+    openBlobInNewTab(backup.blob);
+    statusEl.classList.add('ok');
+    statusEl.textContent = `Otwarto kopię obrazu "${backup.name}" w nowej karcie.`;
+  }
+
+  async function copyCurrentModalSourcePath() {
+    const val = document.getElementById('modalSourcePathInput').value.trim();
+    const statusEl = document.getElementById('modalSourceStatus');
+    statusEl.className = 'source-status';
+
+    if (!val) {
+      statusEl.classList.add('missing');
+      statusEl.textContent = "Brak ścieżki do skopiowania.";
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(val);
+      statusEl.classList.add('ok');
+      statusEl.textContent = `Skopiowano do schowka: ${val}`;
+    } catch (err) {
+      statusEl.classList.add('missing');
+      statusEl.textContent = "Nie udało się skopiować ścieżki do schowka.";
+    }
+  }
+
+  async function openCurrentModalSourceFile() {
+    const statusEl = document.getElementById('modalSourceStatus');
+    statusEl.className = 'source-status';
+
+    if (!modalSourceHandle) {
+      statusEl.classList.add('missing');
+      statusEl.textContent = "Brak uchwytu pliku z dysku dla tego kapsla.";
+      return;
+    }
+
+    try {
+      if (typeof modalSourceHandle.queryPermission === 'function') {
+        let perm = await modalSourceHandle.queryPermission({ mode: 'read' });
+        if (perm !== 'granted' && typeof modalSourceHandle.requestPermission === 'function') {
+          perm = await modalSourceHandle.requestPermission({ mode: 'read' });
+        }
+        if (perm !== 'granted') {
+          statusEl.classList.add('missing');
+          statusEl.textContent = "Brak uprawnienia do odczytu pliku źródłowego.";
+          return;
+        }
+      }
+
+      const file = await modalSourceHandle.getFile();
+      if (!file) {
+        statusEl.classList.add('missing');
+        statusEl.textContent = "Plik źródłowy nie istnieje lub został usunięty.";
+        return;
+      }
+
+      openBlobInNewTab(file);
+      statusEl.classList.add('ok');
+      statusEl.textContent = `Plik istnieje (${file.name}) — otwarto w nowej karcie przeglądarki.`;
+    } catch (err) {
+      statusEl.classList.add('missing');
+      statusEl.textContent = "Plik źródłowy już nie istnieje, został przeniesiony lub zmieniono jego nazwę.";
+    }
+  }
+
+  // ==========================================
+  // 5C. OKNO KOPI ZAPASOWYCH OBRAZÓW ŹRÓDŁOWYCH
+  // ==========================================
+  async function openBackupImagesModal() {
+    await renderBackupImagesList();
+    document.getElementById('backupImagesModal').classList.add('open');
+  }
+
+  function closeBackupImagesModal() {
+    document.getElementById('backupImagesModal').classList.remove('open');
+    revokeBackupModalObjectUrls();
+  }
+
+  function handleBackupModalBackdropClick(e) {
+    if (e.target.id === 'backupImagesModal') {
+      closeBackupImagesModal();
+    }
+  }
+
+  async function renderBackupImagesList() {
+    revokeBackupModalObjectUrls();
+    const listEl = document.getElementById('backupImagesList');
+    const backups = await db.sourceImages.toArray();
+    const allCaps = await db.caps.toArray();
+
+    backups.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+
+    if (backups.length === 0) {
+      listEl.innerHTML = '<div style="color:var(--muted); font-size:0.95rem;">Brak zapisanych kopii obrazów źródłowych.</div>';
+      return;
+    }
+
+    listEl.innerHTML = '';
+    backups.forEach(item => {
+      const linkedCapsCount = allCaps.filter(c => c.sourceImageId === item.id).length;
+      const thumbUrl = item.blob instanceof Blob ? URL.createObjectURL(item.blob) : '';
+      if (thumbUrl) backupModalObjectUrls.push(thumbUrl);
+
+      const dateText = item.createdAt ? new Date(item.createdAt).toLocaleString('pl-PL') : 'brak daty';
+      const sizeText = formatFileSize(item.size || (item.blob ? item.blob.size : 0));
+
+      const row = document.createElement('div');
+      row.className = 'backup-item';
+      row.innerHTML = `
+        ${thumbUrl ? `<img src="${thumbUrl}" alt="${escapeHtml(item.name)}" />` : '<div style="width:92px;height:70px;background:#e2e8f0;border-radius:6px;"></div>'}
+        <div>
+          <div class="backup-item-title">${escapeHtml(item.name || `Obraz #${item.id}`)}</div>
+          <div class="backup-item-meta">
+            Rozmiar: ${escapeHtml(sizeText)} • Dodano: ${escapeHtml(dateText)} • Powiązane kapsle: ${linkedCapsCount}
+          </div>
+        </div>
+        <div class="backup-item-actions">
+          <button type="button" class="secondary" style="padding:7px 12px; font-size:0.9rem;" onclick="openBackedUpImageById(${item.id})">
+            Otwórz
+          </button>
+          <button type="button" class="danger" style="padding:7px 12px; font-size:0.9rem;" onclick="deleteBackedUpImage(${item.id})">
+            Usuń
+          </button>
+        </div>
+      `;
+      listEl.appendChild(row);
+    });
+  }
+
+  async function openBackedUpImageById(backupId) {
+    const item = await db.sourceImages.get(backupId);
+    if (!item || !(item.blob instanceof Blob)) {
+      alert("Nie znaleziono kopii obrazu.");
+      return;
+    }
+    openBlobInNewTab(item.blob);
+  }
+
+  async function deleteBackedUpImage(backupId) {
+    const item = await db.sourceImages.get(backupId);
+    if (!item) return;
+
+    const linkedCaps = await db.caps.where('sourceImageId').equals(backupId).toArray();
+    const msg = linkedCaps.length > 0
+      ? `Usunąć kopię obrazu "${item.name}"? Powiązane kapsle (${linkedCaps.length}) pozostaną w katalogu, ale stracą dostęp do kopii źródłowej.`
+      : `Usunąć kopię obrazu "${item.name}"?`;
+
+    if (!confirm(msg)) return;
+
+    const now = Date.now();
+    await db.transaction('rw', db.caps, db.sourceImages, async () => {
+      for (const cap of linkedCaps) {
+        cap.sourceImageId = null;
+        cap.updatedAt = now;
+        await db.caps.put(cap);
+      }
+      await db.sourceImages.delete(backupId);
+    });
+
+    await updateBackupCountBadge();
+    await renderBackupImagesList();
+  }
+
+  function renderModalTags() {
+    const container = document.getElementById('modalTagsList');
+    if (modalDraftTags.length === 0) {
+      container.innerHTML = '<span style="font-size:0.92rem; color:var(--muted);">Brak tagów</span>';
+      return;
+    }
+    container.innerHTML = modalDraftTags.map(t => `
+      <span class="tag">
+        ${escapeHtml(t)}
+        <span class="remove-tag" title="Usuń tag" onclick="removeTagInModal('${escapeJsString(t)}')">&times;</span>
+      </span>
+    `).join('');
+  }
+
+  function addTagsInModal() {
+    const input = document.getElementById('modalNewTagInput');
+    const newOnes = input.value
+      .split(',')
+      .map(t => t.trim().toLowerCase())
+      .filter(Boolean);
+    if (newOnes.length === 0) return;
+
+    modalDraftTags = [...new Set([...modalDraftTags, ...newOnes])];
+    input.value = '';
+    renderModalTags();
+  }
+
+  function handleModalTagKeydown(e) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      addTagsInModal();
+    }
+  }
+
+  function removeTagInModal(tagToRemove) {
+    modalDraftTags = modalDraftTags.filter(t => t !== tagToRemove);
+    renderModalTags();
+  }
+
+  async function saveCapModalChanges() {
+    if (editingModalCapId == null) return;
+    const cap = await db.caps.get(editingModalCapId);
+    if (!cap) return;
+
+    const newSourcePath = document.getElementById('modalSourcePathInput').value.trim();
+    const newOcrText = document.getElementById('modalOcrInput').value.trim();
+    const newNotes = document.getElementById('modalNotesInput').value.trim();
+
+    const oldOcrWords = new Set(extractWordsFromText(cap.ocrText));
+    const newOcrWords = extractWordsFromText(newOcrText);
+    const newOcrWordSet = new Set(newOcrWords);
+
+    const preservedTags = modalDraftTags.filter(
+      t => !oldOcrWords.has(t.toLowerCase()) || newOcrWordSet.has(t.toLowerCase())
+    );
+
+    cap.sourceImagePath = newSourcePath;
+    cap.colors = [...new Set(modalDraftColors)];
+    delete cap.color;
+    cap.ocrText = newOcrText;
+    cap.notes = newNotes;
+    cap.tags = [...new Set([...preservedTags, ...newOcrWords])];
+
+    await saveModifiedCap(cap);
+    closeCapModal();
+    await renderCatalog();
+  }
+
+  function closeCapModal() {
+    document.getElementById('capModal').classList.remove('open');
+    editingModalCapId = null;
+    modalDraftTags = [];
+    modalDraftColors = [];
+    modalSourceHandle = null;
+    modalSourceImageId = null;
+    if (modalPreviewObjectUrl) {
+      URL.revokeObjectURL(modalPreviewObjectUrl);
+      modalPreviewObjectUrl = null;
+    }
+  }
+
+  function handleModalBackdropClick(e) {
+    if (e.target.id === 'capModal') {
+      closeCapModal();
+    }
+  }
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      if (document.getElementById('backupImagesModal').classList.contains('open')) {
+        closeBackupImagesModal();
+      } else if (document.getElementById('capModal').classList.contains('open')) {
+        closeCapModal();
+      }
+    }
+  });
+
+  function startEditingOcr(capId, currentText, containerEl) {
+    if (containerEl.querySelector('input')) return;
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'ocr-edit-input';
+    input.value = currentText;
+    input.placeholder = 'Wpisz tekst z kapsla...';
+
+    containerEl.innerHTML = '';
+    containerEl.appendChild(input);
+    input.focus();
+    input.select();
+
+    let saved = false;
+    const commitEdit = async () => {
+      if (saved) return;
+      saved = true;
+      const newText = input.value.trim();
+      await updateCapOcrText(capId, newText);
+    };
+
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        commitEdit();
+      } else if (e.key === 'Escape') {
+        saved = true;
+        renderCatalog();
+      }
+    });
+
+    input.addEventListener('blur', commitEdit);
+  }
+
+  async function updateCapOcrText(capId, newText) {
+    const cap = await db.caps.get(capId);
+    if (!cap) return;
+
+    const oldOcrWords = new Set(extractWordsFromText(cap.ocrText));
+    const newOcrWords = extractWordsFromText(newText);
+    const newOcrWordSet = new Set(newOcrWords);
+
+    const preservedTags = (cap.tags || []).filter(
+      t => !oldOcrWords.has(t.toLowerCase()) || newOcrWordSet.has(t.toLowerCase())
+    );
+
+    cap.ocrText = newText;
+    cap.tags = [...new Set([...preservedTags, ...newOcrWords])];
+
+    await saveModifiedCap(cap);
+    renderCatalog();
+  }
+
+  async function applyBulkTag() {
+    const input = document.getElementById('bulkTagInput');
+    const rawTags = input.value.split(',').map(t => t.trim().toLowerCase()).filter(Boolean);
+    if (rawTags.length === 0 || selectedCapIds.size === 0) return;
+
+    for (const id of selectedCapIds) {
+      const cap = await db.caps.get(id);
+      if (cap) {
+        cap.tags = [...new Set([...(cap.tags || []), ...rawTags])];
+        await saveModifiedCap(cap);
+      }
+    }
+
+    input.value = '';
+    renderCatalog();
+  }
+
+  async function applyBulkColor() {
+    const input = document.getElementById('bulkColorInput');
+    const newColors = normalizeColorList(input.value);
+    if (newColors.length === 0 || selectedCapIds.size === 0) return;
+
+    for (const id of selectedCapIds) {
+      const cap = await db.caps.get(id);
+      if (cap) {
+        cap.colors = [...new Set([...getCapColors(cap), ...newColors])];
+        delete cap.color;
+        await saveModifiedCap(cap);
+      }
+    }
+
+    input.value = '';
+    renderCatalog();
+  }
+
+  async function removeColorFromCap(capId, colorToRemove) {
+    const cap = await db.caps.get(capId);
+    if (!cap) return;
+    cap.colors = getCapColors(cap).filter(c => c !== colorToRemove);
+    delete cap.color;
+    await saveModifiedCap(cap);
+    renderCatalog();
+  }
+
+  async function removeTagFromCap(capId, tagToRemove) {
+    const cap = await db.caps.get(capId);
+    if (!cap) return;
+    cap.tags = (cap.tags || []).filter(t => t !== tagToRemove);
+    await saveModifiedCap(cap);
+    renderCatalog();
+  }
+
+  async function deleteSelectedCaps() {
+    if (selectedCapIds.size === 0) return;
+    if (!confirm(`Usunąć zaznaczone kapsle (${selectedCapIds.size})?`)) return;
+
+    await db.caps.bulkDelete([...selectedCapIds]);
+    selectedCapIds.clear();
+    renderCatalog();
+  }
+
+  function selectAllVisible() {
+    visibleCapIds.forEach(id => selectedCapIds.add(id));
+    renderCatalog();
+  }
+
+  function clearSelection() {
+    selectedCapIds.clear();
+    renderCatalog();
+  }
+
+  // ==========================================
+  // 6. ZAPIS / OTWÓRZ ARCHIWUM ZIP (KAPSLE + KOPIE OBRAZÓW ŹRÓDŁOWYCH)
+  // ==========================================
+  async function exportZipDatabase() {
+    if (typeof JSZip === 'undefined') {
+      alert("Biblioteka JSZip nie została załadowana.");
+      return;
+    }
+
+    const allCaps = await db.caps.toArray();
+    const allSourceImages = await db.sourceImages.toArray();
+
+    const zip = new JSZip();
+    const capsFolder = zip.folder("caps");
+    const sourcesFolder = zip.folder("source-images");
+
+    const sourceIdToZipFile = new Map();
+    const sourceImagesMeta = [];
+
+    for (let i = 0; i < allSourceImages.length; i++) {
+      const srcImg = allSourceImages[i];
+      if (!(srcImg.blob instanceof Blob)) continue;
+      const ext = getImageExtensionFromBlob(srcImg.blob);
+      const fileName = `src-${String(i + 1).padStart(4, '0')}.${ext}`;
+      const relPath = `source-images/${fileName}`;
+      sourcesFolder.file(fileName, srcImg.blob);
+      sourceIdToZipFile.set(srcImg.id, relPath);
+      sourceImagesMeta.push({
+        id: srcImg.id,
+        name: srcImg.name || fileName,
+        size: srcImg.size || srcImg.blob.size || 0,
+        mimeType: srcImg.mimeType || srcImg.blob.type || 'image/jpeg',
+        createdAt: srcImg.createdAt || Date.now(),
+        file: relPath
+      });
+    }
+
+    const metadataList = [];
+    for (let i = 0; i < allCaps.length; i++) {
+      const cap = allCaps[i];
+      const { id, imageBlob, image, color, sourceFileHandle, ...rest } = cap;
+      let imageFileName = null;
+
+      if (imageBlob instanceof Blob) {
+        const ext = getImageExtensionFromBlob(imageBlob);
+        const num = String(i + 1).padStart(4, '0');
+        imageFileName = `cap-${num}.${ext}`;
+        capsFolder.file(imageFileName, imageBlob);
+      }
+
+      const createdAt = rest.createdAt || Date.now();
+      metadataList.push({
+        colors: getCapColors(cap),
+        ocrText: rest.ocrText || '',
+        notes: rest.notes || '',
+        tags: Array.isArray(rest.tags) ? rest.tags : [],
+        sourceImagePath: rest.sourceImagePath || '',
+        sourceImageFile: rest.sourceImageId ? (sourceIdToZipFile.get(rest.sourceImageId) || null) : null,
+        createdAt: createdAt,
+        updatedAt: rest.updatedAt || createdAt,
+        imageFile: imageFileName ? `caps/${imageFileName}` : null
+      });
+    }
+
+    zip.file("metadata.json", JSON.stringify({
+      version: 3,
+      caps: metadataList,
+      sourceImages: sourceImagesMeta
+    }, null, 2));
+
+    const zipBlob = await zip.generateAsync({ type: "blob" });
+    const url = URL.createObjectURL(zipBlob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `katalog-kapsli-${new Date().toISOString().slice(0, 10)}.zip`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  }
+
+  async function importZipDatabase(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    try {
+      if (typeof JSZip === 'undefined') {
+        throw new Error("Biblioteka JSZip nie została załadowana.");
+      }
+
+      const zip = await JSZip.loadAsync(file);
+      const metadataFile = zip.file("metadata.json");
+      if (!metadataFile) {
+        throw new Error("W archiwum ZIP brakuje pliku metadata.json.");
+      }
+
+      const rawMeta = await metadataFile.async("string");
+      const parsed = JSON.parse(rawMeta);
+      const capRecords = Array.isArray(parsed) ? parsed : (Array.isArray(parsed.caps) ? parsed.caps : null);
+      const srcRecords = (!Array.isArray(parsed) && Array.isArray(parsed.sourceImages)) ? parsed.sourceImages : [];
+
+      if (!capRecords) {
+        throw new Error("Nieprawidłowa struktura pliku metadata.json.");
+      }
+
+      const existingCount = await db.caps.count();
+      if (existingCount > 0) {
+        const confirmed = confirm(
+          `Otwarcie pliku ZIP zastąpi wszystkie obecnie zapisane kapsle (${existingCount}) nowymi danymi (${capRecords.length}). Kontynuować?`
+        );
+        if (!confirmed) return;
+      }
+
+      const preparedSources = [];
+      const zipPathToSourceIndex = new Map();
+
+      for (const sItem of srcRecords) {
+        if (!sItem.file) continue;
+        const normalizedSrcPath = String(sItem.file).replace(/^\/+/, '');
+        const entry = zip.file(normalizedSrcPath);
+        if (!entry) continue;
+        const blob = await entry.async("blob");
+        const idx = preparedSources.length;
+        preparedSources.push({
+          name: sItem.name || normalizedSrcPath,
+          blob: blob,
+          size: sItem.size || blob.size || 0,
+          mimeType: sItem.mimeType || blob.type || 'image/jpeg',
+          createdAt: sItem.createdAt || Date.now()
+        });
+        zipPathToSourceIndex.set(normalizedSrcPath, idx);
+      }
+
+      const preparedCaps = [];
+      for (const item of capRecords) {
+        let resolvedBlob = null;
+        if (item.imageFile) {
+          const normalizedPath = String(item.imageFile).replace(/^\/+/, '');
+          const imgEntry = zip.file(normalizedPath) || zip.file(`caps/${normalizedPath}`);
+          if (imgEntry) {
+            resolvedBlob = await imgEntry.async("blob");
+          }
+        }
+
+        let linkedSrcIdx = null;
+        if (item.sourceImageFile) {
+          const normalizedSrc = String(item.sourceImageFile).replace(/^\/+/, '');
+          if (zipPathToSourceIndex.has(normalizedSrc)) {
+            linkedSrcIdx = zipPathToSourceIndex.get(normalizedSrc);
+          }
+        }
+
+        const createdAt = item.createdAt || Date.now();
+        preparedCaps.push({
+          imageBlob: resolvedBlob,
+          colors: getCapColors(item),
+          ocrText: item.ocrText || '',
+          notes: item.notes || '',
+          tags: Array.isArray(item.tags) ? item.tags : [],
+          sourceImagePath: item.sourceImagePath || '',
+          sourceFileHandle: null,
+          _srcIdx: linkedSrcIdx,
+          createdAt: createdAt,
+          updatedAt: item.updatedAt || createdAt
+        });
+      }
+
+      await db.transaction('rw', db.caps, db.sourceImages, async () => {
+        await db.caps.clear();
+        await db.sourceImages.clear();
+
+        const addedSourceIds = preparedSources.length > 0
+          ? await db.sourceImages.bulkAdd(preparedSources, { allKeys: true })
+          : [];
+
+        const finalCaps = preparedCaps.map(({ _srcIdx, ...capObj }) => ({
+          ...capObj,
+          sourceImageId: (_srcIdx != null && addedSourceIds[_srcIdx] != null) ? addedSourceIds[_srcIdx] : null
+        }));
+
+        if (finalCaps.length > 0) {
+          await db.caps.bulkAdd(finalCaps);
+        }
+      });
+
+      selectedCapIds.clear();
+      activeTagFilters.clear();
+      activeColorFilters.clear();
+      alert(`Zastąpiono katalog z archiwum ZIP. Wczytano kapsle: ${preparedCaps.length}, kopie obrazów: ${preparedSources.length}!`);
+      await renderCatalog();
+    } catch (err) {
+      alert("Nie udało się otworzyć archiwum ZIP: " + err.message);
+    } finally {
+      event.target.value = '';
+    }
+  }
+
+  function escapeHtml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function escapeJsString(str) {
+    return String(str).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+  }
+</script>
+</body>
+</html>
