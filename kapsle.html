@@ -41,7 +41,7 @@
 
     loadScriptWithFallback(
       "./libs/dexie.min.js",
-      "https://unpkg.com/dexie@3.2.4/dist/dexie.min.js"
+      "https://cdn.jsdelivr.net/npm/dexie@3.2.4/dist/dexie.min.js"
     );
     loadScriptWithFallback(
       "./libs/jszip.min.js",
@@ -721,7 +721,7 @@
 
   <!-- Krok 4: Wyniki katalogu -->
   <div class="stats-bar">
-    <span id="catalogStats">0 kapsli w katalogu</span>
+    <span id="catalogStats">Ładowanie bazy danych...</span>
     <span>Kliknij kartę, aby zaznaczyć • Kliknij 🔍, aby powiększyć i edytować</span>
   </div>
   <div class="grid" id="capGrid"></div>
@@ -841,13 +841,68 @@
 
 <script>
   // ==========================================
-  // 1. KONFIGURACJA LOKALNEJ BAZY DANYCH (IndexedDB / Dexie)
+  // 1. KONFIGURACJA LOKALNEJ BAZY DANYCH (IndexedDB / Dexie) ORAZ STAN SILNIKÓW
   // ==========================================
-  const db = new Dexie("BottleCapCatalogDB");
-  db.version(2).stores({
-    caps: "++id, *tags, *colors, ocrText, sourceImageId, createdAt, updatedAt",
-    sourceImages: "++id, name, createdAt"
-  });
+  let cvReady = false;
+  let openCvWatchdogTimer = null;
+  let db = null;
+  let dbInitPromise = null;
+
+  function ensureDexieLoaded(timeoutMs = 12000) {
+    if (typeof Dexie !== 'undefined') {
+      return Promise.resolve(true);
+    }
+
+    return new Promise((resolve) => {
+      const start = Date.now();
+      let cdnRetried = false;
+
+      const timer = setInterval(() => {
+        if (typeof Dexie !== 'undefined') {
+          clearInterval(timer);
+          resolve(true);
+          return;
+        }
+
+        const elapsed = Date.now() - start;
+        if (!cdnRetried && elapsed > 2000) {
+          cdnRetried = true;
+          const retryScript = document.createElement('script');
+          retryScript.src = "https://cdn.jsdelivr.net/npm/dexie@3.2.4/dist/dexie.min.js";
+          document.head.appendChild(retryScript);
+        }
+
+        if (elapsed >= timeoutMs) {
+          clearInterval(timer);
+          resolve(false);
+        }
+      }, 50);
+    });
+  }
+
+  async function initDatabase() {
+    if (db) return db;
+    if (!dbInitPromise) {
+      dbInitPromise = (async () => {
+        const loaded = await ensureDexieLoaded();
+        if (!loaded || typeof Dexie === 'undefined') {
+          console.error("Dexie nie załadował się ani lokalnie, ani z CDN.");
+          document.getElementById('catalogStats').innerText =
+            "Błąd: Dexie nie załadował się (sprawdź połączenie lub ./libs/dexie.min.js).";
+          return null;
+        }
+
+        const instance = new Dexie("BottleCapCatalogDB");
+        instance.version(2).stores({
+          caps: "++id, *tags, *colors, ocrText, sourceImageId, createdAt, updatedAt",
+          sourceImages: "++id, name, createdAt"
+        });
+        db = instance;
+        return db;
+      })();
+    }
+    return dbInitPromise;
+  }
 
   const STORED_CAP_SIZE = 220;
   const WEBP_QUALITY = 0.75;
@@ -936,13 +991,13 @@
   }
 
   async function saveModifiedCap(cap) {
+    const activeDb = await initDatabase();
+    if (!activeDb) return;
     cap.updatedAt = Date.now();
-    await db.caps.put(cap);
+    await activeDb.caps.put(cap);
   }
 
   // Stan globalny
-  let cvReady = false;
-  let openCvWatchdogTimer = null;
   let currentCircles = []; // { x, y, r }
   let selectedCapIds = new Set();
   let activeTagFilters = new Set();
@@ -1017,8 +1072,13 @@
     }
 
     if (typeof cv.then === 'function') {
-      cv.then((instance) => markOpenCvReady(instance))
-        .catch((err) => onOpenCvError(err && err.message ? err.message : 'błąd inicjalizacji WASM'));
+      const thenResult = cv.then(
+        (instance) => markOpenCvReady(instance),
+        (err) => onOpenCvError(err && err.message ? err.message : 'błąd inicjalizacji WASM')
+      );
+      if (thenResult && typeof thenResult.catch === 'function') {
+        thenResult.catch((err) => onOpenCvError(err && err.message ? err.message : 'błąd inicjalizacji WASM'));
+      }
       return;
     }
 
@@ -1042,8 +1102,9 @@
     }
   }
 
-  window.addEventListener('DOMContentLoaded', () => {
-    renderCatalog();
+  window.addEventListener('DOMContentLoaded', async () => {
+    await initDatabase();
+    await renderCatalog();
     if (typeof cv !== 'undefined' && !cvReady) {
       initOpenCv();
     } else if (!cvReady && !openCvWatchdogTimer) {
@@ -1066,7 +1127,9 @@
   }
 
   async function updateBackupCountBadge() {
-    const count = await db.sourceImages.count();
+    const activeDb = await initDatabase();
+    if (!activeDb) return;
+    const count = await activeDb.sourceImages.count();
     document.getElementById('backupCountBadge').textContent = count;
   }
 
@@ -1174,15 +1237,17 @@
   }
 
   async function ensureSourceImageBackupSaved() {
+    const activeDb = await initDatabase();
+    if (!activeDb) return null;
     const shouldBackup = document.getElementById('backupSourceImagesCheckbox').checked;
     if (!shouldBackup || !(activeSourceFileBlob instanceof Blob)) {
       return null;
     }
     if (activeSourceImageId != null) {
-      const existing = await db.sourceImages.get(activeSourceImageId);
+      const existing = await activeDb.sourceImages.get(activeSourceImageId);
       if (existing) return activeSourceImageId;
     }
-    const id = await db.sourceImages.add({
+    const id = await activeDb.sourceImages.add({
       name: activeSourceImagePath || 'obraz-zrodlowy',
       blob: activeSourceFileBlob,
       size: activeSourceFileBlob.size || 0,
@@ -1426,6 +1491,11 @@
   // 4. EKSTRAKCJA CECH (WIELE KOLORÓW I OCR) ORAZ ZAPIS
   // ==========================================
   async function processAndSaveDetectedCaps() {
+    const activeDb = await initDatabase();
+    if (!activeDb) {
+      alert("Baza danych Dexie nie jest dostępna.");
+      return;
+    }
     if (currentCircles.length === 0) return;
 
     const btn = document.getElementById('saveCapsBtn');
@@ -1478,7 +1548,7 @@
       const imageBlob = await canvasToCompressedBlob(thumbCanvas);
       const now = Date.now();
 
-      await db.caps.add({
+      await activeDb.caps.add({
         imageBlob: imageBlob,
         colors: detectedColors,
         ocrText: ocrText,
@@ -1751,11 +1821,17 @@
   }
 
   async function renderCatalog() {
+    const activeDb = await initDatabase();
+    if (!activeDb) {
+      document.getElementById('catalogStats').innerText = "Błąd: Dexie nie załadował się.";
+      return;
+    }
+
     const query = document.getElementById('searchInput').value.toLowerCase().trim();
     const sortMode = document.getElementById('sortSelect').value;
 
     await updateBackupCountBadge();
-    const allCaps = await db.caps.toArray();
+    const allCaps = await activeDb.caps.toArray();
     populateColorSuggestions(allCaps);
     renderActiveColorFiltersBar();
     renderTagCloud(allCaps);
@@ -1864,7 +1940,9 @@
   // 5B. POWIĘKSZONY PODGLĄD KAPSLĄ (MODAL) + KOPIA OBRAZU ŹRÓDŁOWEGO
   // ==========================================
   async function openCapModal(capId) {
-    const cap = await db.caps.get(capId);
+    const activeDb = await initDatabase();
+    if (!activeDb) return;
+    const cap = await activeDb.caps.get(capId);
     if (!cap) return;
 
     if (modalPreviewObjectUrl) {
@@ -1902,7 +1980,7 @@
     pathInput.value = cap.sourceImagePath || "";
     statusEl.className = 'source-status';
 
-    const backupExists = modalSourceImageId != null && Boolean(await db.sourceImages.get(modalSourceImageId));
+    const backupExists = modalSourceImageId != null && Boolean(await activeDb.sourceImages.get(modalSourceImageId));
     if (backupExists) {
       statusEl.classList.add('ok');
       statusEl.textContent = "Dostępna kopia zapasowa pełnego obrazu w bazie — kliknij „Otwórz kopię obrazu”.";
@@ -1959,6 +2037,8 @@
   }
 
   async function openCurrentModalBackedUpImage() {
+    const activeDb = await initDatabase();
+    if (!activeDb) return;
     const statusEl = document.getElementById('modalSourceStatus');
     statusEl.className = 'source-status';
 
@@ -1968,7 +2048,7 @@
       return;
     }
 
-    const backup = await db.sourceImages.get(modalSourceImageId);
+    const backup = await activeDb.sourceImages.get(modalSourceImageId);
     if (!backup || !(backup.blob instanceof Blob)) {
       statusEl.classList.add('missing');
       statusEl.textContent = "Kopia zapasowa tego obrazu została usunięta.";
@@ -2060,10 +2140,12 @@
   }
 
   async function renderBackupImagesList() {
+    const activeDb = await initDatabase();
+    if (!activeDb) return;
     revokeBackupModalObjectUrls();
     const listEl = document.getElementById('backupImagesList');
-    const backups = await db.sourceImages.toArray();
-    const allCaps = await db.caps.toArray();
+    const backups = await activeDb.sourceImages.toArray();
+    const allCaps = await activeDb.caps.toArray();
 
     backups.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
 
@@ -2105,7 +2187,9 @@
   }
 
   async function openBackedUpImageById(backupId) {
-    const item = await db.sourceImages.get(backupId);
+    const activeDb = await initDatabase();
+    if (!activeDb) return;
+    const item = await activeDb.sourceImages.get(backupId);
     if (!item || !(item.blob instanceof Blob)) {
       alert("Nie znaleziono kopii obrazu.");
       return;
@@ -2114,10 +2198,12 @@
   }
 
   async function deleteBackedUpImage(backupId) {
-    const item = await db.sourceImages.get(backupId);
+    const activeDb = await initDatabase();
+    if (!activeDb) return;
+    const item = await activeDb.sourceImages.get(backupId);
     if (!item) return;
 
-    const linkedCaps = await db.caps.where('sourceImageId').equals(backupId).toArray();
+    const linkedCaps = await activeDb.caps.where('sourceImageId').equals(backupId).toArray();
     const msg = linkedCaps.length > 0
       ? `Usunąć kopię obrazu "${item.name}"? Powiązane kapsle (${linkedCaps.length}) pozostaną w katalogu, ale stracą dostęp do kopii źródłowej.`
       : `Usunąć kopię obrazu "${item.name}"?`;
@@ -2125,13 +2211,13 @@
     if (!confirm(msg)) return;
 
     const now = Date.now();
-    await db.transaction('rw', db.caps, db.sourceImages, async () => {
+    await activeDb.transaction('rw', activeDb.caps, activeDb.sourceImages, async () => {
       for (const cap of linkedCaps) {
         cap.sourceImageId = null;
         cap.updatedAt = now;
-        await db.caps.put(cap);
+        await activeDb.caps.put(cap);
       }
-      await db.sourceImages.delete(backupId);
+      await activeDb.sourceImages.delete(backupId);
     });
 
     await updateBackupCountBadge();
@@ -2178,8 +2264,9 @@
   }
 
   async function saveCapModalChanges() {
-    if (editingModalCapId == null) return;
-    const cap = await db.caps.get(editingModalCapId);
+    const activeDb = await initDatabase();
+    if (!activeDb || editingModalCapId == null) return;
+    const cap = await activeDb.caps.get(editingModalCapId);
     if (!cap) return;
 
     const newSourcePath = document.getElementById('modalSourcePathInput').value.trim();
@@ -2271,7 +2358,9 @@
   }
 
   async function updateCapOcrText(capId, newText) {
-    const cap = await db.caps.get(capId);
+    const activeDb = await initDatabase();
+    if (!activeDb) return;
+    const cap = await activeDb.caps.get(capId);
     if (!cap) return;
 
     const oldOcrWords = new Set(extractWordsFromText(cap.ocrText));
@@ -2290,12 +2379,14 @@
   }
 
   async function applyBulkTag() {
+    const activeDb = await initDatabase();
+    if (!activeDb) return;
     const input = document.getElementById('bulkTagInput');
     const rawTags = input.value.split(',').map(t => t.trim().toLowerCase()).filter(Boolean);
     if (rawTags.length === 0 || selectedCapIds.size === 0) return;
 
     for (const id of selectedCapIds) {
-      const cap = await db.caps.get(id);
+      const cap = await activeDb.caps.get(id);
       if (cap) {
         cap.tags = [...new Set([...(cap.tags || []), ...rawTags])];
         await saveModifiedCap(cap);
@@ -2307,12 +2398,14 @@
   }
 
   async function applyBulkColor() {
+    const activeDb = await initDatabase();
+    if (!activeDb) return;
     const input = document.getElementById('bulkColorInput');
     const newColors = normalizeColorList(input.value);
     if (newColors.length === 0 || selectedCapIds.size === 0) return;
 
     for (const id of selectedCapIds) {
-      const cap = await db.caps.get(id);
+      const cap = await activeDb.caps.get(id);
       if (cap) {
         cap.colors = [...new Set([...getCapColors(cap), ...newColors])];
         delete cap.color;
@@ -2325,7 +2418,9 @@
   }
 
   async function removeColorFromCap(capId, colorToRemove) {
-    const cap = await db.caps.get(capId);
+    const activeDb = await initDatabase();
+    if (!activeDb) return;
+    const cap = await activeDb.caps.get(capId);
     if (!cap) return;
     cap.colors = getCapColors(cap).filter(c => c !== colorToRemove);
     delete cap.color;
@@ -2334,7 +2429,9 @@
   }
 
   async function removeTagFromCap(capId, tagToRemove) {
-    const cap = await db.caps.get(capId);
+    const activeDb = await initDatabase();
+    if (!activeDb) return;
+    const cap = await activeDb.caps.get(capId);
     if (!cap) return;
     cap.tags = (cap.tags || []).filter(t => t !== tagToRemove);
     await saveModifiedCap(cap);
@@ -2342,10 +2439,11 @@
   }
 
   async function deleteSelectedCaps() {
-    if (selectedCapIds.size === 0) return;
+    const activeDb = await initDatabase();
+    if (!activeDb || selectedCapIds.size === 0) return;
     if (!confirm(`Usunąć zaznaczone kapsle (${selectedCapIds.size})?`)) return;
 
-    await db.caps.bulkDelete([...selectedCapIds]);
+    await activeDb.caps.bulkDelete([...selectedCapIds]);
     selectedCapIds.clear();
     renderCatalog();
   }
@@ -2364,13 +2462,18 @@
   // 6. ZAPIS / OTWÓRZ ARCHIWUM ZIP (KAPSLE + KOPIE OBRAZÓW ŹRÓDŁOWYCH)
   // ==========================================
   async function exportZipDatabase() {
+    const activeDb = await initDatabase();
+    if (!activeDb) {
+      alert("Baza danych Dexie nie jest dostępna.");
+      return;
+    }
     if (typeof JSZip === 'undefined') {
       alert("Biblioteka JSZip nie została załadowana.");
       return;
     }
 
-    const allCaps = await db.caps.toArray();
-    const allSourceImages = await db.sourceImages.toArray();
+    const allCaps = await activeDb.caps.toArray();
+    const allSourceImages = await activeDb.sourceImages.toArray();
 
     const zip = new JSZip();
     const capsFolder = zip.folder("caps");
@@ -2444,6 +2547,10 @@
     if (!file) return;
 
     try {
+      const activeDb = await initDatabase();
+      if (!activeDb) {
+        throw new Error("Baza danych Dexie nie jest dostępna.");
+      }
       if (typeof JSZip === 'undefined') {
         throw new Error("Biblioteka JSZip nie została załadowana.");
       }
@@ -2463,7 +2570,7 @@
         throw new Error("Nieprawidłowa struktura pliku metadata.json.");
       }
 
-      const existingCount = await db.caps.count();
+      const existingCount = await activeDb.caps.count();
       if (existingCount > 0) {
         const confirmed = confirm(
           `Otwarcie pliku ZIP zastąpi wszystkie obecnie zapisane kapsle (${existingCount}) nowymi danymi (${capRecords.length}). Kontynuować?`
@@ -2525,12 +2632,12 @@
         });
       }
 
-      await db.transaction('rw', db.caps, db.sourceImages, async () => {
-        await db.caps.clear();
-        await db.sourceImages.clear();
+      await activeDb.transaction('rw', activeDb.caps, activeDb.sourceImages, async () => {
+        await activeDb.caps.clear();
+        await activeDb.sourceImages.clear();
 
         const addedSourceIds = preparedSources.length > 0
-          ? await db.sourceImages.bulkAdd(preparedSources, { allKeys: true })
+          ? await activeDb.sourceImages.bulkAdd(preparedSources, { allKeys: true })
           : [];
 
         const finalCaps = preparedCaps.map(({ _srcIdx, ...capObj }) => ({
@@ -2539,7 +2646,7 @@
         }));
 
         if (finalCaps.length > 0) {
-          await db.caps.bulkAdd(finalCaps);
+          await activeDb.caps.bulkAdd(finalCaps);
         }
       });
 
