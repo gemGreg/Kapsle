@@ -126,6 +126,28 @@
       align-items: center;
     }
 
+    .toolbar-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+      width: 100%;
+    }
+
+    .toolbar-row + .toolbar-row {
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px solid #e2e8f0;
+    }
+
+    .toolbar-right {
+      margin-left: auto;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+    }
+
     input[type="text"], select, textarea {
       padding: 10px 14px;
       border: 1px solid var(--border);
@@ -245,6 +267,15 @@
       padding-bottom: 14px;
       border-bottom: 1px solid #cbd5e1;
       font-size: 1rem;
+    }
+    .queue-badge {
+      display: none;
+      background: #dbeafe;
+      color: #1e3a8a;
+      padding: 5px 12px;
+      border-radius: 999px;
+      font-size: 0.92rem;
+      font-weight: 700;
     }
     .canvas-wrapper {
       position: relative;
@@ -633,12 +664,17 @@
     <div id="statusBadge" class="status-badge">Ładowanie silnika OpenCV...</div>
   </header>
 
-  <!-- Krok 1: Wgrywanie zdjęć i kopia zapasowa ZIP -->
+  <!-- Krok 1: Wgrywanie zdjęć (pojedynczo lub wsadowo) i kopia zapasowa ZIP -->
   <div class="panel">
-    <div class="toolbar">
+    <div class="toolbar-row">
       <input type="file" id="imageInput" accept="image/*" style="display:none;" onchange="handleFallbackFileInput(event)" />
       <button id="uploadBtn" disabled onclick="pickSourceImage()">
         📷 Wybierz zdjęcie kapsli
+      </button>
+
+      <input type="file" id="multiImageInput" accept="image/*" multiple style="display:none;" onchange="handleMultiFileInput(event)" />
+      <button id="batchUploadBtn" disabled onclick="pickBatchSourceImages()">
+        📚 Wybierz wiele zdjęć (kolejka)
       </button>
 
       <label style="display:inline-flex; align-items:center; gap:7px; font-size:0.98rem; font-weight:500;">
@@ -649,12 +685,16 @@
       <button type="button" class="secondary" onclick="openBackupImagesModal()">
         🖼️ Kopie obrazów (<span id="backupCountBadge">0</span>)
       </button>
+    </div>
 
-      <div style="flex-grow:1;"></div>
+    <div class="toolbar-row">
+      <div id="batchProgressLabel" style="font-size:0.95rem; font-weight:600; color:var(--muted);"></div>
 
-      <button class="secondary" onclick="exportZipDatabase()">📦 Zapisz ZIP</button>
-      <input type="file" id="importZipInput" accept=".zip" style="display:none;" onchange="importZipDatabase(event)" />
-      <button class="secondary" onclick="document.getElementById('importZipInput').click()">📂 Otwórz ZIP (zastąp)</button>
+      <div class="toolbar-right">
+        <button class="secondary" onclick="exportZipDatabase()">📦 Zapisz ZIP</button>
+        <input type="file" id="importZipInput" accept=".zip" style="display:none;" onchange="importZipDatabase(event)" />
+        <button class="secondary" onclick="document.getElementById('importZipInput').click()">📂 Otwórz ZIP (zastąp)</button>
+      </div>
     </div>
   </div>
 
@@ -662,6 +702,7 @@
   <div id="stagingArea" class="panel">
     <div class="staging-controls">
       <strong>Zweryfikuj wykryte kapsle (znaleziono: <span id="detectedCount">0</span>)</strong>
+      <span id="batchQueueBadge" class="queue-badge"></span>
 
       <label style="display:inline-flex; align-items:center; gap:6px;">
         Czułość tła:
@@ -684,9 +725,12 @@
         🏷️ Podgląd tagów
       </button>
 
-      <div style="margin-left:auto; display:flex; gap:8px;">
-        <button class="secondary" onclick="closeStaging()">Anuluj</button>
-        <button class="success" id="saveCapsBtn" onclick="processAndSaveDetectedCaps()">✅ Wytnij i zapisz wszystkie</button>
+      <div style="margin-left:auto; display:flex; gap:8px; flex-wrap:wrap;">
+        <button type="button" class="secondary" id="skipBatchSheetBtn" style="display:none;" onclick="skipCurrentBatchSheet()">
+          ⏭️ Pomiń
+        </button>
+        <button class="secondary" onclick="abortBatchOrStaging()">Anuluj</button>
+        <button class="success" id="saveCapsBtn" onclick="processAndSaveDetectedCaps()">✅ Wytnij i zapisz</button>
       </div>
     </div>
 
@@ -1137,6 +1181,10 @@
   let stagedOcrCache = new Map(); // circleGeometryKey -> { words }
   let lastPreviewItems = null;
 
+  // Kolejka wsadowa dla wielu zdjęć
+  let batchQueue = []; // { file, handle, name, circles }
+  let batchQueueIndex = -1;
+
   let selectedCapIds = new Set();
   let activeTagFilters = new Set();
   let activeColorFilters = new Set();
@@ -1173,6 +1221,12 @@
 
   function getCircleCacheKey(c) {
     return `${Math.round(c.x)}_${Math.round(c.y)}_${Math.round(c.r)}`;
+  }
+
+  function syncCurrentCirclesToQueue() {
+    if (batchQueueIndex >= 0 && batchQueueIndex < batchQueue.length && batchQueue[batchQueueIndex]) {
+      batchQueue[batchQueueIndex].circles = currentCircles.map(c => ({ x: c.x, y: c.y, r: c.r }));
+    }
   }
 
   function invalidatePreviewState(clearOcrCache = false) {
@@ -1342,6 +1396,7 @@
     badge.classList.remove('error');
     badge.classList.add('ready');
     document.getElementById('uploadBtn').disabled = false;
+    document.getElementById('batchUploadBtn').disabled = false;
     renderCatalog();
   }
 
@@ -1472,8 +1527,14 @@
   }
 
   // ==========================================
-  // 2. WCZYTYWANIE OBRAZU I WYKRYWANIE KAPSLI
+  // 2. WCZYTYWANIE OBRAZÓW (POJEDYNCZE ORAZ KOLEJKA WSADOWA) I WYKRYWANIE KAPSLI
   // ==========================================
+  function resetSingleQueueState() {
+    batchQueue = [];
+    batchQueueIndex = -1;
+    updateBatchQueueUi();
+  }
+
   async function pickSourceImage() {
     if (typeof window.showOpenFilePicker === 'function') {
       try {
@@ -1486,11 +1547,12 @@
         });
         if (!handle) return;
         const file = await handle.getFile();
+        resetSingleQueueState();
         activeSourceFileHandle = handle;
         activeSourceImagePath = file.webkitRelativePath || handle.name || file.name;
         activeSourceFileBlob = file;
         activeSourceImageId = null;
-        loadImageFileIntoEditor(file);
+        await loadImageFileIntoEditor(file);
         return;
       } catch (err) {
         if (err && err.name === 'AbortError') return;
@@ -1499,36 +1561,208 @@
     document.getElementById('imageInput').click();
   }
 
-  function handleFallbackFileInput(e) {
+  async function handleFallbackFileInput(e) {
     const file = e.target.files[0];
+    e.target.value = '';
     if (!file) return;
+    resetSingleQueueState();
     activeSourceFileHandle = null;
     activeSourceImagePath = file.webkitRelativePath || file.name;
     activeSourceFileBlob = file;
     activeSourceImageId = null;
-    loadImageFileIntoEditor(file);
-    e.target.value = '';
+    await loadImageFileIntoEditor(file);
   }
 
-  function loadImageFileIntoEditor(file) {
-    const img = new Image();
-    const tempUrl = URL.createObjectURL(file);
-    img.onload = () => {
-      const targetWidth = 1200;
-      const scale = Math.min(1, targetWidth / img.width);
-      cleanCanvas.width = Math.round(img.width * scale);
-      cleanCanvas.height = Math.round(img.height * scale);
-      cleanCtx.drawImage(img, 0, 0, cleanCanvas.width, cleanCanvas.height);
+  async function pickBatchSourceImages() {
+    if (!cvReady) return;
+    if (typeof window.showOpenFilePicker === 'function') {
+      try {
+        const handles = await window.showOpenFilePicker({
+          multiple: true,
+          types: [{
+            description: 'Obrazy',
+            accept: { 'image/*': ['.png', '.jpg', '.jpeg', '.webp'] }
+          }]
+        });
+        if (!handles || handles.length === 0) return;
+        const entries = [];
+        for (const h of handles) {
+          const f = await h.getFile();
+          entries.push({ file: f, handle: h, name: h.name || f.name });
+        }
+        await prepareAndStartBatchQueue(entries);
+        return;
+      } catch (err) {
+        if (err && err.name === 'AbortError') return;
+      }
+    }
+    document.getElementById('multiImageInput').click();
+  }
 
-      editorCanvas.width = cleanCanvas.width;
-      editorCanvas.height = cleanCanvas.height;
-      URL.revokeObjectURL(tempUrl);
+  async function handleMultiFileInput(e) {
+    const files = [...(e.target.files || [])];
+    e.target.value = '';
+    if (files.length === 0) return;
+    const entries = files.map(f => ({
+      file: f,
+      handle: null,
+      name: f.webkitRelativePath || f.name
+    }));
+    await prepareAndStartBatchQueue(entries);
+  }
 
-      invalidatePreviewState(true);
-      document.getElementById('stagingArea').style.display = 'block';
-      runCapDetection();
-    };
-    img.src = tempUrl;
+  function loadBitmapToCleanCanvas(fileOrBlob) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      const tempUrl = URL.createObjectURL(fileOrBlob);
+      img.onload = () => {
+        const targetWidth = 1200;
+        const scale = Math.min(1, targetWidth / img.width);
+        cleanCanvas.width = Math.round(img.width * scale);
+        cleanCanvas.height = Math.round(img.height * scale);
+        cleanCtx.clearRect(0, 0, cleanCanvas.width, cleanCanvas.height);
+        cleanCtx.drawImage(img, 0, 0, cleanCanvas.width, cleanCanvas.height);
+
+        editorCanvas.width = cleanCanvas.width;
+        editorCanvas.height = cleanCanvas.height;
+        URL.revokeObjectURL(tempUrl);
+        resolve();
+      };
+      img.onerror = (err) => {
+        URL.revokeObjectURL(tempUrl);
+        reject(err);
+      };
+      img.src = tempUrl;
+    });
+  }
+
+  async function loadImageFileIntoEditor(file) {
+    await loadBitmapToCleanCanvas(file);
+    invalidatePreviewState(true);
+    updateBatchQueueUi();
+    document.getElementById('stagingArea').style.display = 'block';
+    runCapDetection();
+  }
+
+  function updateBatchQueueUi() {
+    const badge = document.getElementById('batchQueueBadge');
+    const skipBtn = document.getElementById('skipBatchSheetBtn');
+    if (!badge || !skipBtn) return;
+
+    if (batchQueue.length > 0 && batchQueueIndex >= 0 && batchQueueIndex < batchQueue.length) {
+      const item = batchQueue[batchQueueIndex];
+      badge.style.display = 'inline-block';
+      badge.textContent = `Kolejka: ${batchQueueIndex + 1} / ${batchQueue.length} (${item.name})`;
+      skipBtn.style.display = 'inline-block';
+    } else {
+      badge.style.display = 'none';
+      badge.textContent = '';
+      skipBtn.style.display = 'none';
+    }
+  }
+
+  async function loadQueueItemIntoStaging(index) {
+    if (index < 0 || index >= batchQueue.length) {
+      batchQueue = [];
+      batchQueueIndex = -1;
+      updateBatchQueueUi();
+      closeStaging();
+      await renderCatalog();
+      return;
+    }
+
+    batchQueueIndex = index;
+    const item = batchQueue[index];
+
+    activeSourceFileHandle = item.handle || null;
+    activeSourceImagePath = item.name || '';
+    activeSourceFileBlob = item.file || null;
+    activeSourceImageId = null;
+
+    await loadBitmapToCleanCanvas(item.file);
+    currentCircles = Array.isArray(item.circles)
+      ? item.circles.map(c => ({ x: c.x, y: c.y, r: c.r }))
+      : [];
+
+    dragMode = null;
+    activeCircleIdx = -1;
+    invalidatePreviewState(true);
+    updateBatchQueueUi();
+
+    document.getElementById('stagingArea').style.display = 'block';
+    drawEditorCanvas();
+  }
+
+  async function prepareAndStartBatchQueue(entries) {
+    const activeDb = await initDatabase();
+    if (!activeDb || !cvReady || entries.length === 0) return;
+
+    const batchBtn = document.getElementById('batchUploadBtn');
+    const uploadBtn = document.getElementById('uploadBtn');
+    const progressEl = document.getElementById('batchProgressLabel');
+    const sensitivity = getSensitivityValue();
+
+    batchBtn.disabled = true;
+    uploadBtn.disabled = true;
+    batchQueue = [];
+    batchQueueIndex = -1;
+
+    try {
+      for (let i = 0; i < entries.length; i++) {
+        const { file, handle, name } = entries[i];
+        progressEl.textContent = `⏳ Wykrywanie kapsli: ${i + 1} / ${entries.length} (${name})...`;
+
+        await loadBitmapToCleanCanvas(file);
+        const circles = detectCirclesFromCanvas(cleanCanvas, sensitivity);
+        batchQueue.push({ file, handle, name, circles });
+
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
+
+      progressEl.textContent = `✅ Wczytano ${batchQueue.length} zdjęć do kolejki. Weryfikuj po jednym.`;
+      await loadQueueItemIntoStaging(0);
+    } catch (err) {
+      console.error("Błąd przygotowania kolejki:", err);
+      progressEl.textContent = `❌ Błąd: ${err.message}`;
+      alert("Błąd przygotowania kolejki: " + err.message);
+    } finally {
+      batchBtn.disabled = false;
+      uploadBtn.disabled = false;
+    }
+  }
+
+  async function advanceOrFinishBatchQueue() {
+    const hasQueue = batchQueue.length > 0 && batchQueueIndex >= 0;
+    if (hasQueue && batchQueueIndex + 1 < batchQueue.length) {
+      await renderCatalog();
+      await loadQueueItemIntoStaging(batchQueueIndex + 1);
+    } else {
+      batchQueue = [];
+      batchQueueIndex = -1;
+      updateBatchQueueUi();
+      closeStaging();
+      document.getElementById('batchProgressLabel').textContent = '✅ Zakończono przetwarzanie wszystkich zdjęć w kolejce.';
+      await renderCatalog();
+    }
+  }
+
+  async function skipCurrentBatchSheet() {
+    if (batchQueue.length > 0 && batchQueueIndex >= 0) {
+      await advanceOrFinishBatchQueue();
+    } else {
+      closeStaging();
+    }
+  }
+
+  function abortBatchOrStaging() {
+    const hadQueue = batchQueue.length > 0;
+    batchQueue = [];
+    batchQueueIndex = -1;
+    updateBatchQueueUi();
+    closeStaging();
+    if (hadQueue) {
+      document.getElementById('batchProgressLabel').textContent = '⏹️ Przerwano kolejkę — zapisane wcześniej kapsle zachowano.';
+    }
   }
 
   async function ensureSourceImageBackupSaved() {
@@ -1560,10 +1794,8 @@
     runCapDetection();
   }
 
-  function runCapDetection() {
-    if (!cvReady) return;
-
-    let src = cv.imread(cleanCanvas);
+  function detectCirclesFromCanvas(sourceCanvas, sensitivity) {
+    let src = cv.imread(sourceCanvas);
     let lab = new cv.Mat();
     cv.cvtColor(src, lab, cv.COLOR_RGBA2RGB);
     cv.cvtColor(lab, lab, cv.COLOR_RGB2Lab);
@@ -1571,16 +1803,15 @@
     const margin = 12;
     const corners = [
       lab.ucharPtr(margin, margin),
-      lab.ucharPtr(margin, lab.cols - margin),
-      lab.ucharPtr(lab.rows - margin, margin),
-      lab.ucharPtr(lab.rows - margin, lab.cols - margin)
+      lab.ucharPtr(margin, Math.max(margin + 1, lab.cols - margin)),
+      lab.ucharPtr(Math.max(margin + 1, lab.rows - margin), margin),
+      lab.ucharPtr(Math.max(margin + 1, lab.rows - margin), Math.max(margin + 1, lab.cols - margin))
     ];
     let bgL = 0, bgA = 0, bgB = 0;
     corners.forEach(p => { bgL += p[0]; bgA += p[1]; bgB += p[2]; });
     bgL /= 4; bgA /= 4; bgB /= 4;
 
     let mask = new cv.Mat.zeros(lab.rows, lab.cols, cv.CV_8UC1);
-    const sensitivity = getSensitivityValue();
 
     for (let r = 0; r < lab.rows; r++) {
       for (let c = 0; c < lab.cols; c++) {
@@ -1622,11 +1853,11 @@
       });
     }
 
-    currentCircles = [];
+    let circles = [];
     if (candidates.length > 0) {
       const sortedR = candidates.map(c => c.r).sort((a, b) => a - b);
       const medianR = sortedR[Math.floor(sortedR.length / 2)];
-      currentCircles = candidates.filter(
+      circles = candidates.filter(
         c => c.r >= medianR * 0.65 && c.r <= medianR * 1.35
       );
     }
@@ -1635,6 +1866,13 @@
     kernel.delete(); dist.delete(); sureFg.delete();
     contours.delete(); hierarchy.delete();
 
+    return circles;
+  }
+
+  function runCapDetection() {
+    if (!cvReady) return;
+    currentCircles = detectCirclesFromCanvas(cleanCanvas, getSensitivityValue());
+    syncCurrentCirclesToQueue();
     drawEditorCanvas();
   }
 
@@ -1701,7 +1939,8 @@
     if (e.shiftKey && hit) {
       currentCircles.splice(hit.index, 1);
       activeCircleIdx = -1;
-      lastPreviewItems = null;
+      syncCurrentCirclesToQueue();
+      invalidatePreviewState(false);
       drawEditorCanvas();
       return;
     }
@@ -1717,7 +1956,7 @@
         dragOffsetX = pos.x - currentCircles[hit.index].x;
         dragOffsetY = pos.y - currentCircles[hit.index].y;
       }
-      lastPreviewItems = null;
+      invalidatePreviewState(false);
       drawEditorCanvas();
     } else {
       const defaultR = currentCircles.length > 0
@@ -1726,7 +1965,8 @@
       currentCircles.push({ x: pos.x, y: pos.y, r: defaultR });
       activeCircleIdx = currentCircles.length - 1;
       dragMode = 'create';
-      lastPreviewItems = null;
+      syncCurrentCirclesToQueue();
+      invalidatePreviewState(false);
       drawEditorCanvas();
     }
   });
@@ -1757,6 +1997,7 @@
       circle.r = Math.max(MIN_CIRCLE_RADIUS, newRadius);
     }
 
+    syncCurrentCirclesToQueue();
     drawEditorCanvas();
   });
 
@@ -1764,6 +2005,7 @@
     if (dragMode) {
       dragMode = null;
       activeCircleIdx = -1;
+      syncCurrentCirclesToQueue();
       drawEditorCanvas();
     }
   });
@@ -1775,7 +2017,8 @@
     if (hit) {
       currentCircles.splice(hit.index, 1);
       activeCircleIdx = -1;
-      lastPreviewItems = null;
+      syncCurrentCirclesToQueue();
+      invalidatePreviewState(false);
       drawEditorCanvas();
     }
   });
@@ -1797,101 +2040,118 @@
       alert("Baza danych Dexie nie jest dostępna.");
       return;
     }
-    if (currentCircles.length === 0) return;
+    if (currentCircles.length === 0) {
+      await advanceOrFinishBatchQueue();
+      return;
+    }
 
     const btn = document.getElementById('saveCapsBtn');
+    const skipBtn = document.getElementById('skipBatchSheetBtn');
     const runOcr = document.getElementById('enableOcrCheckbox').checked;
     const threshold = getTagConfidenceThreshold();
     btn.disabled = true;
-
-    const savedSourceImageId = await ensureSourceImageBackupSaved();
-
-    const existingCaps = await activeDb.caps.toArray();
-    const existingTagsSet = new Set(
-      existingCaps.flatMap(c => (c.tags || []).map(t => String(t).trim().toLowerCase()).filter(Boolean))
-    );
+    if (skipBtn) skipBtn.disabled = true;
 
     let worker = null;
-    if (runOcr) {
-      btn.innerText = "⏳ Inicjalizacja OCR...";
-      worker = await createCapTesseractWorker();
-    }
+    try {
+      const savedSourceImageId = await ensureSourceImageBackupSaved();
 
-    const stagedItems = [];
+      const existingCaps = await activeDb.caps.toArray();
+      const existingTagsSet = new Set(
+        existingCaps.flatMap(c => (c.tags || []).map(t => String(t).trim().toLowerCase()).filter(Boolean))
+      );
 
-    for (let i = 0; i < currentCircles.length; i++) {
-      btn.innerText = `⏳ Przetwarzanie kapsla ${i + 1} z ${currentCircles.length}...`;
-      const c = currentCircles[i];
-      const rawCropCanvas = cropCircleForOcr(c);
-      const rawCtx = rawCropCanvas.getContext('2d');
-
-      const detectedColors = extractRingColors(rawCtx, rawCropCanvas.width / 2, rawCropCanvas.height / 2, c.r * 0.55);
-
-      let ocrText = "";
-      let candidates = [];
-
-      if (worker) {
-        const key = getCircleCacheKey(c);
-        let cached = stagedOcrCache.get(key);
-        let words = cached ? cached.words : null;
-
-        if (!words) {
-          const ret = await worker.recognize(rawCropCanvas);
-          words = Array.isArray(ret.data?.words) && ret.data.words.length > 0
-            ? ret.data.words
-            : String(ret.data?.text || '')
-                .split(/\s+/)
-                .filter(Boolean)
-                .map(text => ({ text, confidence: 65 }));
-          stagedOcrCache.set(key, { words });
-        }
-
-        const evaluated = evaluateCandidatesFromWords(words, threshold, existingTagsSet);
-        ocrText = evaluated.ocrText;
-        candidates = evaluated.candidates;
+      if (runOcr) {
+        btn.innerText = "⏳ Inicjalizacja OCR...";
+        worker = await createCapTesseractWorker();
       }
 
-      const thumbCanvas = document.createElement('canvas');
-      thumbCanvas.width = STORED_CAP_SIZE;
-      thumbCanvas.height = STORED_CAP_SIZE;
-      const thumbCtx = thumbCanvas.getContext('2d');
-      thumbCtx.drawImage(rawCropCanvas, 0, 0, STORED_CAP_SIZE, STORED_CAP_SIZE);
+      const stagedItems = [];
 
-      const imageBlob = await canvasToCompressedBlob(thumbCanvas);
+      for (let i = 0; i < currentCircles.length; i++) {
+        btn.innerText = `⏳ Przetwarzanie kapsla ${i + 1} z ${currentCircles.length}...`;
+        const c = currentCircles[i];
+        const rawCropCanvas = cropCircleForOcr(c);
+        const rawCtx = rawCropCanvas.getContext('2d');
 
-      stagedItems.push({
-        imageBlob,
-        detectedColors,
-        ocrText,
-        candidates,
-        savedSourceImageId
-      });
+        const detectedColors = extractRingColors(rawCtx, rawCropCanvas.width / 2, rawCropCanvas.height / 2, c.r * 0.55);
+
+        let ocrText = "";
+        let candidates = [];
+
+        if (worker) {
+          const key = getCircleCacheKey(c);
+          let cached = stagedOcrCache.get(key);
+          let words = cached ? cached.words : null;
+
+          if (!words) {
+            const ret = await worker.recognize(rawCropCanvas);
+            words = Array.isArray(ret.data?.words) && ret.data.words.length > 0
+              ? ret.data.words
+              : String(ret.data?.text || '')
+                  .split(/\s+/)
+                  .filter(Boolean)
+                  .map(text => ({ text, confidence: 65 }));
+            stagedOcrCache.set(key, { words });
+          }
+
+          const evaluated = evaluateCandidatesFromWords(words, threshold, existingTagsSet);
+          ocrText = evaluated.ocrText;
+          candidates = evaluated.candidates;
+        }
+
+        const thumbCanvas = document.createElement('canvas');
+        thumbCanvas.width = STORED_CAP_SIZE;
+        thumbCanvas.height = STORED_CAP_SIZE;
+        const thumbCtx = thumbCanvas.getContext('2d');
+        thumbCtx.drawImage(rawCropCanvas, 0, 0, STORED_CAP_SIZE, STORED_CAP_SIZE);
+
+        const imageBlob = await canvasToCompressedBlob(thumbCanvas);
+
+        stagedItems.push({
+          imageBlob,
+          detectedColors,
+          ocrText,
+          candidates,
+          savedSourceImageId
+        });
+      }
+
+      if (worker) {
+        await worker.terminate();
+        worker = null;
+      }
+
+      const finalizedItems = computeBatchTags(stagedItems, threshold, existingTagsSet);
+      const now = Date.now();
+
+      for (const item of finalizedItems) {
+        await activeDb.caps.add({
+          imageBlob: item.imageBlob,
+          colors: item.detectedColors,
+          ocrText: item.ocrText,
+          notes: "",
+          tags: item.tags,
+          sourceImagePath: activeSourceImagePath || "",
+          sourceFileHandle: activeSourceFileHandle || null,
+          sourceImageId: item.savedSourceImageId,
+          createdAt: now,
+          updatedAt: now
+        });
+      }
+
+      await advanceOrFinishBatchQueue();
+    } catch (err) {
+      console.error("Błąd zapisu kapsli:", err);
+      alert("Nie udało się zapisać kapsli: " + err.message);
+    } finally {
+      if (worker) {
+        await worker.terminate();
+      }
+      btn.disabled = false;
+      btn.innerText = "✅ Wytnij i zapisz";
+      if (skipBtn) skipBtn.disabled = false;
     }
-
-    if (worker) await worker.terminate();
-
-    const finalizedItems = computeBatchTags(stagedItems, threshold, existingTagsSet);
-    const now = Date.now();
-
-    for (const item of finalizedItems) {
-      await activeDb.caps.add({
-        imageBlob: item.imageBlob,
-        colors: item.detectedColors,
-        ocrText: item.ocrText,
-        notes: "",
-        tags: item.tags,
-        sourceImagePath: activeSourceImagePath || "",
-        sourceFileHandle: activeSourceFileHandle || null,
-        sourceImageId: item.savedSourceImageId,
-        createdAt: now,
-        updatedAt: now
-      });
-    }
-
-    btn.disabled = false;
-    btn.innerText = "✅ Wytnij i zapisz wszystkie";
-    closeStaging();
-    renderCatalog();
   }
 
   function classifySingleRgb(r, g, b) {
